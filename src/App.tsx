@@ -40,7 +40,12 @@ export const App: React.FC = () => {
   );
   const [currentSentenceIndex, setCurrentSentenceIndex] = useState<number>(0);
   const [readerState, setReaderState] = useState<ReaderState>('idle');
-  const [viewMode, setViewMode] = useState<ViewMode>('split');
+  // Default to clean 'reader' mode so both Mobile and PC start focused and uncluttered
+  const [viewMode, setViewMode] = useState<ViewMode>('reader');
+  // On mobile (< 1024px), keep the AI drawer closed by default so the text is 100% readable
+  const [isAiPanelOpen, setIsAiPanelOpen] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1024 : false
+  );
   const [providerConfig, setProviderConfig] = useState<ProviderConfig>(() =>
     loadProviderConfig()
   );
@@ -215,7 +220,7 @@ export const App: React.FC = () => {
       if (!config.apiKeys[config.providerId]?.trim()) {
         setReaderState('paused');
         setErrorBanner(
-          `Conecte sua API Key do ${providerMeta.name} clicando em "Conectar IA" no topo para receber respostas comentadas por voz.`
+          `Conecte sua API Key do ${providerMeta.name} para receber respostas comentadas por voz.`
         );
         setIsSettingsOpen(true);
         return;
@@ -342,18 +347,6 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleLoadDemo = async () => {
-    speechService.stopSpeaking();
-    speechService.stopListening();
-    const demo = createDemoDocument();
-    setDocumentData(demo);
-    setCurrentSentenceIndex(0);
-    setReaderState('idle');
-    const hist = await loadConversationHistory(demo.id);
-    setMessages(hist);
-    await saveActiveDocument(demo);
-  };
-
   const handleSelectSentence = (globalIndex: number, autoPlay = true) => {
     setCurrentSentenceIndex(globalIndex);
     if (autoPlay) {
@@ -379,6 +372,7 @@ export const App: React.FC = () => {
 
   const handleAskAboutSentence = (sentence: PDFSentence) => {
     setCurrentSentenceIndex(sentence.globalIndex);
+    setIsAiPanelOpen(true);
     triggerAiInteraction(
       `Comente e explique o significado deste trecho: "${sentence.text}"`,
       'text',
@@ -404,10 +398,11 @@ export const App: React.FC = () => {
   const currentSentence =
     documentData.sentences[currentSentenceIndex] || documentData.sentences[0];
   const currentPage = currentSentence?.pageNumber || 1;
+  const latestAiMessage = [...messages].reverse().find((m) => m.role === 'assistant');
 
   return (
     <div
-      className="h-screen w-screen flex flex-col bg-slate-950 text-slate-100 overflow-hidden select-none sm:select-auto"
+      className="h-[100dvh] w-screen flex flex-col bg-slate-950 text-slate-100 overflow-hidden"
       onDragOver={(e) => {
         e.preventDefault();
         setIsDraggingOver(true);
@@ -436,7 +431,7 @@ export const App: React.FC = () => {
         </div>
       )}
 
-      {/* Top Header */}
+      {/* Compact Responsive Header */}
       <Header
         fileName={documentData.fileName}
         totalPages={documentData.totalPages}
@@ -446,12 +441,32 @@ export const App: React.FC = () => {
         providerConfig={providerConfig}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onUploadPdf={handleUploadPdf}
-        onLoadDemo={handleLoadDemo}
         isLoadingPdf={isLoadingPdf}
+        isAiPanelOpen={isAiPanelOpen}
+        onToggleAiPanel={() => setIsAiPanelOpen((prev) => !prev)}
+        messageCount={messages.length}
       />
 
-      {/* Main Workspace: PDF Viewer + Focused Reader + Assistant Sidebar */}
-      <main className="flex-1 flex flex-col lg:flex-row overflow-hidden min-h-0">
+      {/* Floating AI Speaking Banner when AI drawer is closed (great on Mobile!) */}
+      {!isAiPanelOpen &&
+        (readerState === 'thinking_ai' || readerState === 'speaking_ai') && (
+          <div
+            onClick={() => setIsAiPanelOpen(true)}
+            className="mx-3 mt-2 px-4 py-2.5 rounded-xl bg-indigo-950/90 border border-indigo-500/40 shadow-lg flex items-center justify-between gap-3 cursor-pointer z-10"
+          >
+            <p className="text-xs text-indigo-100 line-clamp-2">
+              {readerState === 'thinking_ai'
+                ? '🧠 IA analisando sua pergunta sobre o trecho...'
+                : `💬 IA: "${latestAiMessage?.content || 'Respondendo em voz alta...'}"`}
+            </p>
+            <span className="text-[11px] font-semibold text-indigo-300 shrink-0 underline">
+              Ver chat
+            </span>
+          </div>
+        )}
+
+      {/* Main Reading Workspace — Always takes 100% available height on Mobile & Desktop */}
+      <main className="flex-1 flex flex-row overflow-hidden min-h-0 relative">
         <div className="flex-1 flex overflow-hidden min-h-0">
           {(viewMode === 'split' || viewMode === 'pdf') && (
             <div
@@ -485,8 +500,10 @@ export const App: React.FC = () => {
           )}
         </div>
 
-        {/* Interactive AI Voice & Text Assistant Sidebar */}
+        {/* AI Assistant Drawer (Overlay on Mobile, Collapsible Right Column on Desktop) */}
         <AssistantSidebar
+          isOpen={isAiPanelOpen}
+          onClose={() => setIsAiPanelOpen(false)}
           messages={messages}
           currentSentence={currentSentence}
           readerState={readerState}
@@ -514,7 +531,7 @@ export const App: React.FC = () => {
         />
       </main>
 
-      {/* Bottom Audio & Voice Barge-in Control Bar */}
+      {/* Compact Single-Row Audio & Voice Barge-in Control Bar */}
       <VoiceControlBar
         readerState={readerState}
         currentSentenceIndex={currentSentenceIndex}
