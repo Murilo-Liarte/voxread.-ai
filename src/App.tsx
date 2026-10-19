@@ -42,6 +42,7 @@ import type {
   SidebarTab,
   StudyStats,
   ViewMode,
+  VoiceModelDownloadProgress,
   VoiceSettings,
 } from './types';
 
@@ -80,6 +81,8 @@ export const App: React.FC = () => {
   const [interimTranscript, setInterimTranscript] = useState<string>('');
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
+  const [downloadProgress, setDownloadProgress] =
+    useState<VoiceModelDownloadProgress | null>(null);
 
   // Refs to avoid stale closures inside async TTS/STT callbacks
   const docRef = useRef<PDFDocumentData>(documentData);
@@ -112,6 +115,13 @@ export const App: React.FC = () => {
   useEffect(() => {
     flashcardsRef.current = flashcards;
   }, [flashcards]);
+
+  // Subscribe to offline neural voice model download progress
+  useEffect(() => {
+    return speechService.subscribeDownloadProgress((progress) => {
+      setDownloadProgress(progress);
+    });
+  }, []);
 
   // Track active reading time for Neuroscience Dashboard
   useEffect(() => {
@@ -263,6 +273,17 @@ export const App: React.FC = () => {
         settings: voiceSettingsRef.current,
         geminiKeyFallback: providerConfigRef.current.apiKeys.gemini,
         openAiKeyFallback: providerConfigRef.current.apiKeys.openai,
+        onStart: () => {
+          // Lookahead Pre-Fetching: synthesize sentence N+1 in the background while sentence N plays!
+          const nextSentence = docRef.current.sentences[boundedIndex + 1];
+          if (nextSentence && voiceSettingsRef.current.prefetchNextSentence !== false) {
+            speechService.prefetch(
+              nextSentence.text,
+              nextSentence.blockType,
+              voiceSettingsRef.current
+            );
+          }
+        },
         onWordProgress: (_charIndex, ratio) => {
           setWordProgressRatio(ratio);
         },
@@ -784,6 +805,8 @@ export const App: React.FC = () => {
         currentPage={currentPage}
         totalPages={documentData.totalPages}
         speechRate={voiceSettings.rate}
+        ttsEngine={voiceSettings.ttsEngine}
+        downloadProgress={downloadProgress}
         interimTranscript={interimTranscript}
         onTogglePlayPause={handleTogglePlayPause}
         onPrevSentence={() =>
@@ -802,6 +825,7 @@ export const App: React.FC = () => {
           )
         }
         onCycleSpeed={handleCycleSpeed}
+        onOpenVoiceSettings={() => setIsSettingsOpen(true)}
         onInterruptWithVoice={handleInterruptWithVoice}
         onStopVoiceListening={handleStopVoiceListening}
         onResumeReadingNow={() => speakSentenceAtIndex(currentSentenceIndex)}
@@ -821,6 +845,7 @@ export const App: React.FC = () => {
           setVoiceSettings(newVoice);
           saveVoiceSettings(newVoice);
         }}
+        downloadProgress={downloadProgress}
       />
 
       {/* Neuroscience of the Method Modal (Endomarketing & Live Study Telemetry) */}

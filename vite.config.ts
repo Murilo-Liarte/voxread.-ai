@@ -1,7 +1,7 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { buildProviderRequest, extractProviderText, type LlmChatRequestBody } from './src/server/llmProxy';
-import { synthesizeWithEdgeTtsNode, type EdgeTtsRequestBody } from './src/server/edgeTtsProxy';
+import { MsEdgeTTS, OUTPUT_FORMAT } from 'msedge-tts';
 import type { IncomingMessage, ServerResponse } from 'http';
 
 function readRequestBody(req: IncomingMessage): Promise<string> {
@@ -23,6 +23,7 @@ function sendJson(res: ServerResponse, status: number, payload: unknown) {
 
 function llmProxyPlugin(): Plugin {
   const attachMiddleware = (middlewares: any) => {
+    // 1. Multi-LLM Chat Proxy
     middlewares.use('/api/llm/chat', async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== 'POST') {
         return sendJson(res, 405, { error: 'Método não permitido. Use POST.' });
@@ -82,6 +83,7 @@ function llmProxyPlugin(): Plugin {
       }
     });
 
+    // 2. Zero-API Microsoft Edge Neural TTS Proxy (pt-BR-FranciscaNeural, pt-BR-AntonioNeural, etc.)
     middlewares.use('/api/llm/edge-tts', async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== 'POST') {
         return sendJson(res, 405, { error: 'Método não permitido. Use POST.' });
@@ -89,16 +91,53 @@ function llmProxyPlugin(): Plugin {
 
       try {
         const rawBody = await readRequestBody(req);
-        const body = JSON.parse(rawBody) as EdgeTtsRequestBody;
-        const payload = await synthesizeWithEdgeTtsNode(body);
-        return sendJson(res, 200, payload);
+        const body = JSON.parse(rawBody) as {
+          text: string;
+          voice?: string;
+          rate?: number;
+          pitch?: string;
+        };
+
+        if (!body.text?.trim()) {
+          return sendJson(res, 400, { error: 'Texto vazio para Edge TTS.' });
+        }
+
+        const tts = new MsEdgeTTS();
+        const voiceName = body.voice || 'pt-BR-FranciscaNeural';
+        await tts.setMetadata(
+          voiceName,
+          OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3
+        );
+
+        const ratePct = Math.round(((body.rate || 1.0) - 1.0) * 100);
+        const rateStr = ratePct >= 0 ? `+${ratePct}%` : `${ratePct}%`;
+
+        const { audioStream } = tts.toStream(body.text, {
+          rate: rateStr,
+          pitch: body.pitch || '+0Hz',
+        });
+
+        const chunks: Buffer[] = [];
+        await new Promise<void>((resolve, reject) => {
+          audioStream.on('data', (chunk: Buffer) => {
+            chunks.push(Buffer.from(chunk));
+          });
+          audioStream.on('end', () => resolve());
+          audioStream.on('error', (err: any) => reject(err));
+        });
+
+        const finalBuffer = Buffer.concat(chunks);
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.end(finalBuffer);
       } catch (err: any) {
-        return sendJson(res, 502, {
-          error: err?.message || 'Falha ao sintetizar voz via msedge-tts / edge-tts.',
+        return sendJson(res, 500, {
+          error: err?.message || 'Erro ao sintetizar voz Edge Neural.',
         });
       }
     });
 
+    // 3. Optional OpenAI Cloud TTS Proxy
     middlewares.use('/api/llm/tts', async (req: IncomingMessage, res: ServerResponse) => {
       if (req.method !== 'POST') {
         return sendJson(res, 405, { error: 'Método não permitido. Use POST.' });
@@ -164,4 +203,7 @@ function llmProxyPlugin(): Plugin {
 export default defineConfig({
   base: './',
   plugins: [react(), llmProxyPlugin()],
+  optimizeDeps: {
+    exclude: ['@mintplex-labs/piper-tts-web', 'onnxruntime-web'],
+  },
 });

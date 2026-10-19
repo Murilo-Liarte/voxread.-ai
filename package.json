@@ -10,8 +10,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@mintplex-labs/piper-tts-web": "^1.0.5",
     "edge-tts-universal": "^1.4.0",
     "idb-keyval": "^6.2.1",
+    "kokoro-js": "^1.2.1",
     "lucide-react": "^0.468.0",
     "msedge-tts": "^2.1.0",
     "pdfjs-dist": "^4.8.69",
