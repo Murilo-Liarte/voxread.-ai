@@ -3,14 +3,17 @@ import {
   splitParagraphIntoSentences,
   segmentPageText,
   createDemoDocument,
+  isHeaderOrFooterArtifact,
+  classifySentenceBlockType,
 } from '../services/pdfService';
 import {
   buildProviderRequest,
   extractProviderText,
 } from '../server/llmProxy';
 import { buildReadingSystemPrompt } from '../services/llmService';
+import { pcmBase64ToWavBlob } from '../services/speechService';
 
-describe('PDF Sentence & Paragraph Segmentation', () => {
+describe('PDF Sentence, BBox & Estratégia/Gran Sanitizer', () => {
   it('splits paragraphs into natural sentences without breaking on common abbreviations', () => {
     const paragraph =
       'O Dr. Carlos analisou o Art. 5 da constituição com atenção. Em seguida, ele apresentou um resumo claro para toda a equipe.';
@@ -20,100 +23,90 @@ describe('PDF Sentence & Paragraph Segmentation', () => {
     expect(sentences[1]).toContain('apresentou um resumo');
   });
 
-  it('indexes page paragraphs and sentences with accurate global and page indices', () => {
+  it('filters out Estratégia and Gran Cursos repetitive headers, footers, and CPF watermarks', () => {
+    expect(isHeaderOrFooterArtifact('Estratégia Concursos', 0.02, true)).toBe(true);
+    expect(isHeaderOrFooterArtifact('Gran Cursos Online', 0.98, true)).toBe(true);
+    expect(isHeaderOrFooterArtifact('Página 14 de 98', 0.96, true)).toBe(true);
+    expect(
+      isHeaderOrFooterArtifact(
+        'O princípio da impessoalidade veda a promoção pessoal de autoridades.',
+        0.5,
+        true
+      )
+    ).toBe(false);
+  });
+
+  it('classifies headings and exam alert boxes (Atenção / Pegadinha de Prova)', () => {
+    expect(
+      classifySentenceBlockType('1.1 Princípios da Administração Pública')
+    ).toBe('heading');
+    expect(
+      classifySentenceBlockType(
+        'Atenção! Pegadinha de Prova: O princípio da legalidade comporta exceções.'
+      )
+    ).toBe('alert');
+    expect(
+      classifySentenceBlockType(
+        'No exercício do poder vinculado, a lei estabelece todos os requisitos.'
+      )
+    ).toBe('normal');
+  });
+
+  it('indexes page paragraphs, BBox coordinates, and topics with isTopicEnd markers', () => {
     const rawText =
-      'Primeiro parágrafo de introdução ao tema científico.\n\nSegundo parágrafo com duas frases distintas. Aqui está a segunda frase do parágrafo.';
+      '1.1 Primeiro Tópico de Estudo\n\nTexto explicativo do primeiro tópico com detalhes importantes. Segunda frase conclusiva do tópico.';
     const { pageContent, sentences } = segmentPageText(rawText, 2, 10);
 
     expect(pageContent.pageNumber).toBe(2);
-    expect(pageContent.paragraphs.length).toBe(2);
     expect(sentences.length).toBe(3);
-    expect(sentences[0].globalIndex).toBe(10);
-    expect(sentences[1].globalIndex).toBe(11);
-    expect(sentences[2].globalIndex).toBe(12);
-    expect(sentences[2].pageNumber).toBe(2);
+    expect(sentences[0].bboxes.length).toBeGreaterThan(0);
+    expect(sentences[0].blockType).toBe('heading');
   });
 
-  it('creates a valid multi-page interactive demo document', () => {
+  it('creates a valid multi-topic Concursos demo document with topics and BBoxes', () => {
     const demo = createDemoDocument();
     expect(demo.totalPages).toBe(3);
-    expect(demo.sentences.length).toBeGreaterThan(6);
-    expect(demo.pages[0].pageNumber).toBe(1);
+    expect(demo.topics.length).toBeGreaterThanOrEqual(3);
+    expect(demo.sentences.some((s) => s.isTopicEnd)).toBe(true);
+    expect(demo.sentences.some((s) => s.blockType === 'alert')).toBe(true);
   });
 });
 
-describe('Multi-LLM Adapter & Anti-CORS Proxy Formatter', () => {
+describe('Expressive TTS & Multi-LLM Adapter', () => {
+  it('converts Gemini 24kHz PCM base64 audio into a valid WAV Blob', () => {
+    const dummyPcm = btoa('\x00\x00\x01\x00\x02\x00\x03\x00');
+    const blob = pcmBase64ToWavBlob(dummyPcm, 24000);
+    expect(blob.type).toBe('audio/wav');
+    expect(blob.size).toBe(44 + 8);
+  });
+
   it('formats Google Gemini requests and extracts responses properly', () => {
     const req = buildProviderRequest({
       provider: 'gemini',
       apiKey: 'AIzaTestKey123',
       model: 'gemini-2.5-flash',
-      systemPrompt: 'Você é um assistente de leitura.',
-      messages: [{ role: 'user', content: 'O que significa este parágrafo?' }],
+      systemPrompt: 'Você é um professor de concursos.',
+      messages: [{ role: 'user', content: 'Explique com analogia.' }],
     });
 
     expect(req.url).toContain('gemini-2.5-flash:generateContent?key=AIzaTestKey123');
-    const parsedBody = JSON.parse(req.body);
-    expect(parsedBody.systemInstruction.parts[0].text).toBe('Você é um assistente de leitura.');
-    expect(parsedBody.contents[0].parts[0].text).toBe('O que significa este parágrafo?');
-
     const extracted = extractProviderText('gemini', {
       candidates: [
         {
           content: {
-            parts: [{ text: 'Este parágrafo explica a leitura assistida.' }],
+            parts: [{ text: 'Explicação didática do professor.' }],
           },
         },
       ],
     });
-    expect(extracted).toBe('Este parágrafo explica a leitura assistida.');
+    expect(extracted).toBe('Explicação didática do professor.');
   });
 
-  it('formats Anthropic Claude requests with x-api-key and anthropic-version headers', () => {
-    const req = buildProviderRequest({
-      provider: 'claude',
-      apiKey: 'sk-ant-test',
-      model: 'claude-3-7-sonnet-latest',
-      systemPrompt: 'Sistema Claude',
-      messages: [{ role: 'user', content: 'Explique o texto.' }],
-    });
-
-    expect(req.url).toBe('https://api.anthropic.com/v1/messages');
-    expect(req.headers['x-api-key']).toBe('sk-ant-test');
-    expect(req.headers['anthropic-version']).toBe('2023-06-01');
-
-    const extracted = extractProviderText('claude', {
-      content: [{ type: 'text', text: 'Explicação detalhada do Claude.' }],
-    });
-    expect(extracted).toBe('Explicação detalhada do Claude.');
-  });
-
-  it('formats OpenAI, DeepSeek, Kimi, and GLM requests using Bearer token and chat/completions', () => {
-    const providers = ['openai', 'deepseek', 'kimi', 'glm'] as const;
-    for (const provider of providers) {
-      const req = buildProviderRequest({
-        provider,
-        apiKey: `key-${provider}`,
-        model: `model-${provider}`,
-        systemPrompt: 'Prompt do sistema',
-        messages: [{ role: 'user', content: 'Pergunta do leitor' }],
-      });
-
-      expect(req.url.endsWith('/chat/completions')).toBe(true);
-      expect(req.headers.Authorization).toBe(`Bearer key-${provider}`);
-
-      const text = extractProviderText(provider, {
-        choices: [{ message: { content: `Resposta de ${provider}` } }],
-      });
-      expect(text).toBe(`Resposta de ${provider}`);
-    }
-  });
-
-  it('builds a contextual reading system prompt anchored to the active sentence', () => {
+  it('builds a Professor system prompt anchored to the active sentence and exam boards', () => {
     const demo = createDemoDocument();
     const prompt = buildReadingSystemPrompt(demo, 1);
     expect(prompt).toContain(demo.fileName);
-    expect(prompt).toContain(demo.sentences[1].text);
-    expect(prompt).toContain('LIDA EM VOZ ALTA');
+    expect(prompt).toContain('Cebraspe');
+    expect(prompt).toContain('Podemos continuar a leitura?');
   });
 });

@@ -46,10 +46,16 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
   const isListeningUser = readerState === 'listening_user';
   const isThinkingAi = readerState === 'thinking_ai';
   const isSpeakingAi = readerState === 'speaking_ai';
+  const isFlashcardPause = readerState === 'flashcard_pause';
+
+  const isWaveActive = isReading || isListeningUser || isSpeakingAi;
 
   const progressPercent =
     totalSentences > 0
-      ? Math.min(100, Math.round(((currentSentenceIndex + 1) / totalSentences) * 100))
+      ? Math.min(
+          100,
+          Math.round(((currentSentenceIndex + 1) / totalSentences) * 100)
+        )
       : 0;
 
   return (
@@ -57,12 +63,12 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
       {/* Thin Top Progress Bar */}
       <div className="w-full h-1 bg-slate-800 overflow-hidden">
         <div
-          className="h-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-300"
+          className="h-full bg-gradient-to-r from-indigo-500 via-violet-500 to-emerald-400 transition-all duration-300"
           style={{ width: `${progressPercent}%` }}
         />
       </div>
 
-      {/* Floating Banner when Listening to User Voice */}
+      {/* Live Voice Transcript Banner when Listening */}
       {isListeningUser && (
         <div className="px-3 py-1.5 bg-rose-600/20 border-b border-rose-500/30 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
@@ -70,7 +76,7 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
             <span className="text-xs font-medium text-rose-200 truncate">
               {interimTranscript
                 ? `"${interimTranscript}"`
-                : 'Ouvindo sua pergunta... Fale agora!'}
+                : 'Professor ouvindo... Pergunte ou diga "Mostrar resposta"!'}
             </span>
           </div>
           <button
@@ -83,30 +89,56 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
         </div>
       )}
 
-      {/* Single-Row Compact Player Controls */}
+      {/* Single-Row Floating Assistant & Player Bar */}
       <div className="h-14 px-3 sm:px-6 flex items-center justify-between gap-2 max-w-6xl mx-auto">
-        {/* Left: Sentence Counter & Speed */}
-        <div className="flex items-center gap-2">
+        {/* Left: Animated Soundwave Indicator + Speed */}
+        <div className="flex items-center gap-2.5">
           <button
             type="button"
             onClick={onCycleSpeed}
             className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono font-semibold border border-slate-700 transition-colors"
-            title="Velocidade da voz"
+            title="Alterar velocidade de leitura (1.0x, 1.15x, 1.3x, 1.5x)"
           >
             {speechRate.toFixed(2)}x
           </button>
 
-          <div className="hidden sm:flex flex-col text-[11px] leading-tight text-slate-400">
-            <span className="font-medium text-slate-200">
-              {isReading && '🔊 Lendo PDF...'}
-              {isListeningUser && '🎙️ Ouvindo você...'}
-              {isThinkingAi && '🧠 IA pensando...'}
-              {isSpeakingAi && '💬 IA respondendo...'}
-              {(readerState === 'idle' || readerState === 'paused') && '⏸️ Pausado'}
-            </span>
-            <span>
-              Frase {currentSentenceIndex + 1} de {totalSentences} ({progressPercent}%)
-            </span>
+          {/* Animated Audio Waveform Indicator */}
+          <div className="flex items-center gap-2">
+            <div className="flex items-end gap-0.5 h-4 px-1">
+              {[0.5, 1.0, 0.7, 0.9, 0.6].map((h, idx) => (
+                <span
+                  key={idx}
+                  style={{
+                    height: isWaveActive ? `${Math.round(h * 16)}px` : '4px',
+                    animationDelay: `${idx * 120}ms`,
+                  }}
+                  className={`w-0.5 rounded-full transition-all duration-200 ${
+                    isListeningUser
+                      ? 'bg-rose-400 animate-pulse'
+                      : isSpeakingAi
+                      ? 'bg-emerald-400 animate-pulse'
+                      : isReading
+                      ? 'bg-indigo-400 animate-pulse'
+                      : 'bg-slate-600'
+                  }`}
+                />
+              ))}
+            </div>
+
+            <div className="hidden sm:flex flex-col text-[11px] leading-tight text-slate-400">
+              <span className="font-semibold text-slate-200">
+                {isReading && 'Lendo c/ Cursor Sincronizado'}
+                {isListeningUser && 'Ouvindo Comando de Voz...'}
+                {isThinkingAi && 'Professor analisando...'}
+                {isSpeakingAi && 'Professor explicando...'}
+                {isFlashcardPause && 'Pausa: Active Recall (Flashcards)'}
+                {(readerState === 'idle' || readerState === 'paused') &&
+                  'Pausado (Espaço p/ falar)'}
+              </span>
+              <span>
+                Frase {currentSentenceIndex + 1}/{totalSentences} ({progressPercent}%)
+              </span>
+            </div>
           </div>
         </div>
 
@@ -155,14 +187,14 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
           </button>
         </div>
 
-        {/* Right: Instant Voice Interruption ("Barge-in") */}
+        {/* Right: Active Voice Professor Trigger */}
         <div className="flex items-center gap-1.5">
           {isSpeakingAi && (
             <button
               type="button"
               onClick={onResumeReadingNow}
               className="flex items-center gap-1 px-2.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold transition-all"
-              title="Voltar à leitura do PDF"
+              title="Retomar leitura do PDF"
             >
               <CornerDownRight className="w-3.5 h-3.5" />
               <span className="hidden md:inline">Voltar ao PDF</span>
@@ -176,7 +208,7 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
               className="flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-md transition-all"
             >
               <MicOff className="w-4 h-4" />
-              <span>Parar</span>
+              <span>Enviar Voz</span>
             </button>
           ) : (
             <button
@@ -184,14 +216,14 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
               onClick={onInterruptWithVoice}
               disabled={isThinkingAi}
               className="flex items-center gap-1.5 px-3 sm:px-4 py-2 rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white text-xs font-bold shadow-md shadow-rose-600/20 transition-all disabled:opacity-40"
-              title="Pausa a leitura e escuta sua dúvida por voz"
+              title="Atalho: Barra de Espaço • Pausa a leitura e aciona o Modo Professor por voz"
             >
               {isThinkingAi ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
               ) : (
                 <Mic className="w-4 h-4" />
               )}
-              <span className="hidden xs:inline sm:inline">Falar com IA</span>
+              <span>Professor (Voz)</span>
             </button>
           )}
         </div>
