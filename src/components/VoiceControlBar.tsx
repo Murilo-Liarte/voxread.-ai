@@ -9,8 +9,11 @@ import {
   Loader2,
   CornerDownRight,
   Cpu,
+  AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
 import type {
+  EngineStatus,
   ReaderState,
   TtsEngineMode,
   VoiceModelDownloadProgress,
@@ -24,6 +27,7 @@ interface VoiceControlBarProps {
   totalPages: number;
   speechRate: number;
   ttsEngine: TtsEngineMode;
+  engineStatus?: EngineStatus | null;
   downloadProgress?: VoiceModelDownloadProgress | null;
   interimTranscript: string;
   onTogglePlayPause: () => void;
@@ -36,14 +40,14 @@ interface VoiceControlBarProps {
   onResumeReadingNow: () => void;
 }
 
-const ENGINE_LABELS: Record<TtsEngineMode, string> = {
-  piper_wasm: 'Piper Neural Offline',
-  kokoro_webgpu: 'Kokoro-82M Neural',
-  edge_neural: 'Edge Neural Studio',
+const ENGINE_SHORT_LABELS: Record<TtsEngineMode, string> = {
+  piper_wasm: 'Piper Neural',
+  kokoro_webgpu: 'Kokoro-82M',
+  edge_neural: 'Edge Neural',
   gemini_tts: 'Gemini Audio',
   openai_cloud: 'OpenAI Neural',
   elevenlabs: 'ElevenLabs',
-  browser: 'Sistema',
+  browser: 'Voz do Sistema',
 };
 
 export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
@@ -52,6 +56,7 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
   totalSentences,
   speechRate,
   ttsEngine,
+  engineStatus,
   downloadProgress,
   interimTranscript,
   onTogglePlayPause,
@@ -78,6 +83,26 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
           Math.round(((currentSentenceIndex + 1) / totalSentences) * 100)
         )
       : 0;
+
+  // Determine badge appearance based on real live EngineStatus
+  const activeState = engineStatus?.state || 'idle';
+  const badgeStyle =
+    activeState === 'failed'
+      ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border-rose-500/40'
+      : activeState === 'fallback'
+      ? 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40'
+      : activeState === 'loading'
+      ? 'bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 border-indigo-500/40'
+      : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
+
+  const badgeText =
+    activeState === 'failed'
+      ? `Erro: ${ENGINE_SHORT_LABELS[ttsEngine]}`
+      : activeState === 'fallback'
+      ? 'Fallback: Sistema'
+      : activeState === 'loading'
+      ? `Sintetizando (${ENGINE_SHORT_LABELS[ttsEngine]})...`
+      : engineStatus?.voiceLabel || ENGINE_SHORT_LABELS[ttsEngine] || 'Voz Neural';
 
   return (
     <footer className="border-t border-slate-800/90 bg-slate-900/95 backdrop-blur-md shrink-0 z-20 relative">
@@ -134,13 +159,13 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
       )}
 
       {/* Single-Row Floating Assistant & Player Bar */}
-      <div className="h-14 px-3 sm:px-6 flex items-center justify-between gap-2 max-w-6xl mx-auto">
-        {/* Left: Animated Soundwave Indicator + Speed + Engine Badge */}
-        <div className="flex items-center gap-2">
+      <div className="h-14 px-2.5 sm:px-6 flex items-center justify-between gap-2 max-w-6xl mx-auto">
+        {/* Left: Speed + Live Neural Engine Status Badge + Waveform */}
+        <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
           <button
             type="button"
             onClick={onCycleSpeed}
-            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono font-semibold border border-slate-700 transition-colors"
+            className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono font-semibold border border-slate-700 transition-colors shrink-0"
             title="Alterar velocidade de leitura (1.0x, 1.15x, 1.3x, 1.5x)"
           >
             {speechRate.toFixed(2)}x
@@ -149,15 +174,27 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
           <button
             type="button"
             onClick={onOpenVoiceSettings}
-            className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold transition-colors"
-            title="Trocar motor de voz neural (Piper Offline, Kokoro-82M, Edge Neural)"
+            className={`inline-flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-colors max-w-[140px] sm:max-w-[220px] truncate ${badgeStyle}`}
+            title={
+              engineStatus?.error
+                ? `Motivo da falha: ${engineStatus.error} (Clique para abrir Diagnóstico de Voz)`
+                : 'Clique para abrir o Diagnóstico de Voz e trocar entre Piper, Kokoro-82M e Edge Neural'
+            }
           >
-            <Cpu className="w-3.5 h-3.5 text-emerald-400" />
-            <span>{ENGINE_LABELS[ttsEngine] || 'Voz Neural'}</span>
+            {activeState === 'loading' ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+            ) : activeState === 'failed' || activeState === 'fallback' ? (
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            ) : activeState === 'playing' ? (
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+            ) : (
+              <Cpu className="w-3.5 h-3.5 shrink-0" />
+            )}
+            <span className="truncate">{badgeText}</span>
           </button>
 
           {/* Animated Audio Waveform Indicator */}
-          <div className="flex items-center gap-2">
+          <div className="hidden lg:flex items-center gap-2">
             <div className="flex items-end gap-0.5 h-4 px-1">
               {[0.5, 1.0, 0.7, 0.9, 0.6].map((h, idx) => (
                 <span
@@ -179,7 +216,7 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
               ))}
             </div>
 
-            <div className="hidden sm:flex flex-col text-[11px] leading-tight text-slate-400">
+            <div className="flex flex-col text-[11px] leading-tight text-slate-400">
               <span className="font-semibold text-slate-200">
                 {isReading && 'Lendo c/ Cursor Sincronizado'}
                 {isListeningUser && 'Ouvindo Comando de Voz...'}
@@ -197,7 +234,7 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
         </div>
 
         {/* Center: Prev / Play-Pause / Next */}
-        <div className="flex items-center gap-1.5 sm:gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <button
             type="button"
             onClick={onPrevSentence}
@@ -211,7 +248,7 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
           <button
             type="button"
             onClick={onTogglePlayPause}
-            className={`flex items-center gap-1.5 px-4 sm:px-5 py-2 rounded-xl font-semibold text-xs sm:text-sm shadow-md transition-all ${
+            className={`flex items-center gap-1.5 px-3.5 sm:px-5 py-2 rounded-xl font-semibold text-xs sm:text-sm shadow-md transition-all ${
               isReading
                 ? 'bg-amber-500 hover:bg-amber-400 text-slate-950'
                 : 'bg-indigo-600 hover:bg-indigo-500 text-white'
@@ -242,7 +279,7 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
         </div>
 
         {/* Right: Active Voice Professor Trigger */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 shrink-0">
           {isSpeakingAi && (
             <button
               type="button"
@@ -277,7 +314,7 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
               ) : (
                 <Mic className="w-4 h-4" />
               )}
-              <span>Professor (Voz)</span>
+              <span className="hidden xs:inline sm:inline">Professor (Voz)</span>
             </button>
           )}
         </div>

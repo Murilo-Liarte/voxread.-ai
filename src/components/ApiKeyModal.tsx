@@ -15,12 +15,16 @@ import {
   Cpu,
   Zap,
   Radio,
+  Activity,
+  ShieldAlert,
 } from 'lucide-react';
 import { PROVIDERS_CATALOG, testProviderConnection } from '../services/llmService';
 import { speechService } from '../services/speechService';
 import type {
+  EngineStatus,
   LLMProviderId,
   ProviderConfig,
+  VoiceDiagnosticResult,
   VoiceModelDownloadProgress,
   VoiceSettings,
 } from '../types';
@@ -33,6 +37,7 @@ interface ApiKeyModalProps {
   voiceSettings: VoiceSettings;
   onSaveVoiceSettings: (settings: VoiceSettings) => void;
   downloadProgress?: VoiceModelDownloadProgress | null;
+  engineStatus?: EngineStatus | null;
 }
 
 const PROVIDER_ORDER: LLMProviderId[] = [
@@ -53,6 +58,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   voiceSettings,
   onSaveVoiceSettings,
   downloadProgress,
+  engineStatus,
 }) => {
   const [draftConfig, setDraftConfig] = useState<ProviderConfig>(providerConfig);
   const [draftVoice, setDraftVoice] = useState<VoiceSettings>(voiceSettings);
@@ -61,6 +67,10 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [isPreloadingVoice, setIsPreloadingVoice] = useState(false);
   const [preloadDoneMsg, setPreloadDoneMsg] = useState<string | null>(null);
+  const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
+  const [diagnosticResults, setDiagnosticResults] = useState<
+    VoiceDiagnosticResult[] | null
+  >(null);
   const [testState, setTestState] = useState<{
     loading: boolean;
     ok?: boolean;
@@ -147,6 +157,20 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
     }
   };
 
+  const handleRunDiagnostics = async () => {
+    setIsRunningDiagnostics(true);
+    setDiagnosticResults(null);
+    try {
+      const results = await speechService.runVoiceDiagnostics(
+        draftVoice,
+        draftConfig.apiKeys.gemini
+      );
+      setDiagnosticResults(results);
+    } finally {
+      setIsRunningDiagnostics(false);
+    }
+  };
+
   const handleTestVoiceSample = () => {
     speechService.speak({
       text: 'Atenção para esta dica de prova! Enquanto na esfera privada o particular pode fazer tudo que a lei não proíbe, na Administração Pública o gestor só age quando a lei autoriza.',
@@ -174,10 +198,10 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-slate-100">
-                Voz Neural Zero-API & Inteligência Artificial
+                Voz Neural Zero-API & Diagnóstico de Áudio
               </h2>
               <p className="text-xs text-slate-400">
-                Motores neurais offline/expressivos sem chave de API + Cérebro do Professor IA
+                Motores neurais reais no navegador (sem cair na voz robótica do sistema)
               </p>
             </div>
           </div>
@@ -227,7 +251,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                 <div>
                   <div className="flex items-center justify-between mb-2.5">
                     <label className="block text-xs font-bold uppercase tracking-wider text-emerald-400">
-                      Motores Neurais Zero-API (100% Gratuitos & Com Emoção)
+                      Motores Neurais Zero-API (100% Gratuitos & Reais)
                     </label>
                     <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
                       Sem Chave de API
@@ -258,7 +282,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                           </span>
                         </div>
                         <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                          Roda 100% dentro do seu navegador via ONNX/WASM. Baixa uma única vez (~18MB) e funciona até sem internet!
+                          Roda 100% dentro do navegador via ONNX 1.30. Baixa uma única vez (~18MB) e funciona offline!
                         </p>
                       </div>
                     </button>
@@ -286,7 +310,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                           </span>
                         </div>
                         <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                          Modelo estado-da-arte de 82M parâmetros (WebGPU/WASM) com vozes nativas PT-BR (Dora, Alex e Santa).
+                          Modelo neural de 82M parâmetros com fonemizador PT-BR nativo e timbres Dora, Alex e Santa.
                         </p>
                       </div>
                     </button>
@@ -310,11 +334,11 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                             Edge Neural Studio
                           </span>
                           <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 font-bold">
-                            Instantâneo
+                            Proxy/Local
                           </span>
                         </div>
                         <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                          Vozes neurais da Microsoft (Francisca, Antonio e Thalita) com entonação fluida sem precisar de chave.
+                          Vozes neurais da Microsoft (Francisca, Thalita e Antonio) via servidor local ou Cloudflare Worker.
                         </p>
                       </div>
                     </button>
@@ -466,36 +490,60 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                       </option>
                     </select>
                     <p className="text-[11px] text-slate-400">
-                      ✨ Na primeira leitura, o modelo neural Kokoro (~80MB) é baixado automaticamente e salvo em cache no navegador.
+                      ✨ Na primeira leitura, o modelo neural Kokoro q8 (~86MB) é baixado automaticamente e salvo em cache no navegador.
                     </p>
                   </div>
                 )}
 
                 {draftVoice.ttsEngine === 'edge_neural' && (
-                  <div className="space-y-2 pt-2 border-t border-slate-800/80">
-                    <label className="block text-xs font-medium text-slate-300">
-                      Timbre Microsoft Edge Neural (pt-BR)
-                    </label>
-                    <select
-                      value={draftVoice.edgeVoiceId || 'pt-BR-FranciscaNeural'}
-                      onChange={(e) =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          edgeVoiceId: e.target.value as any,
-                        }))
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                    >
-                      <option value="pt-BR-FranciscaNeural">
-                        Francisca Neural (Feminina • Entonação Humana Calorosa e Fluida)
-                      </option>
-                      <option value="pt-BR-ThalitaMultilingualNeural">
-                        Thalita Multilingual Neural (Feminina • Expressiva de Estúdio)
-                      </option>
-                      <option value="pt-BR-AntonioNeural">
-                        Antonio Neural (Masculina • Didática e Firme para Aulas)
-                      </option>
-                    </select>
+                  <div className="space-y-3 pt-2 border-t border-slate-800/80">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300 mb-1">
+                          Timbre Microsoft Edge Neural (pt-BR)
+                        </label>
+                        <select
+                          value={draftVoice.edgeVoiceId || 'pt-BR-FranciscaNeural'}
+                          onChange={(e) =>
+                            setDraftVoice((prev) => ({
+                              ...prev,
+                              edgeVoiceId: e.target.value as any,
+                            }))
+                          }
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
+                        >
+                          <option value="pt-BR-FranciscaNeural">
+                            Francisca Neural (Feminina • Calorosa e Fluida)
+                          </option>
+                          <option value="pt-BR-ThalitaMultilingualNeural">
+                            Thalita Multilingual Neural (Feminina • Estúdio)
+                          </option>
+                          <option value="pt-BR-AntonioNeural">
+                            Antonio Neural (Masculina • Didática de Professor)
+                          </option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300 mb-1">
+                          URL do Cloudflare Worker (Para GitHub Pages)
+                        </label>
+                        <input
+                          type="text"
+                          value={draftVoice.edgeProxyUrl || ''}
+                          onChange={(e) =>
+                            setDraftVoice((prev) => ({
+                              ...prev,
+                              edgeProxyUrl: e.target.value,
+                            }))
+                          }
+                          placeholder="https://voxread-edge-tts-proxy.<sua-conta>.workers.dev"
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
+                        />
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      💡 No servidor local (`npm run dev`), o proxy já está embutido. Para usar no GitHub Pages estático, publique o worker em `workers/edge-tts` (`npx wrangler deploy`) ou use **Piper / Kokoro-82M** sem precisar de proxy.
+                    </p>
                   </div>
                 )}
 
@@ -693,10 +741,183 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* Live Engine Status Feedback Banner */}
+                {engineStatus && engineStatus.state !== 'idle' && (
+                  <div
+                    className={`rounded-xl px-3.5 py-2.5 border text-xs flex items-start justify-between gap-3 ${
+                      engineStatus.state === 'failed'
+                        ? 'bg-rose-500/10 border-rose-500/40 text-rose-200'
+                        : engineStatus.state === 'fallback'
+                        ? 'bg-amber-500/10 border-amber-500/40 text-amber-200'
+                        : engineStatus.state === 'loading'
+                        ? 'bg-indigo-500/10 border-indigo-500/40 text-indigo-200'
+                        : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      {engineStatus.state === 'loading' ? (
+                        <Loader2 className="w-4 h-4 animate-spin shrink-0 mt-0.5 text-indigo-400" />
+                      ) : engineStatus.state === 'failed' ||
+                        engineStatus.state === 'fallback' ? (
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
+                      ) : (
+                        <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-400" />
+                      )}
+                      <div>
+                        <span className="font-bold block">
+                          {engineStatus.state === 'playing' &&
+                            `Tocando agora: ${engineStatus.voiceLabel}${
+                              engineStatus.latencyMs ? ` (${engineStatus.latencyMs}ms)` : ''
+                            }`}
+                          {engineStatus.state === 'loading' &&
+                            `Sintetizando áudio neural: ${engineStatus.voiceLabel}...`}
+                          {engineStatus.state === 'failed' &&
+                            `Motor bloqueado (sem cair na voz robótica): ${engineStatus.voiceLabel}`}
+                          {engineStatus.state === 'fallback' &&
+                            `Usando Voz do Sistema (Fallback): ${engineStatus.voiceLabel}`}
+                        </span>
+                        {engineStatus.error && (
+                          <span className="block text-[11px] opacity-90 mt-0.5">
+                            Motivo: {engineStatus.error}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* Study Method Checkboxes */}
+              {/* 🩺 Voice Diagnostic & Side-by-Side Audio Comparator Panel */}
               <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
+                      <Activity className="w-4 h-4 text-indigo-400" />
+                      <span>Diagnóstico de Voz & Comparador Lado a Lado</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      Teste todos os motores neurais de uma vez e clique em Ouvir para comparar a qualidade real de cada um.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRunDiagnostics}
+                    disabled={isRunningDiagnostics}
+                    className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 text-xs font-bold transition-colors shrink-0 disabled:opacity-50"
+                  >
+                    {isRunningDiagnostics ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Testando Motores...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Rodar Diagnóstico</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {diagnosticResults && (
+                  <div className="space-y-2 pt-2 border-t border-slate-800/80">
+                    {diagnosticResults.map((res) => (
+                      <div
+                        key={res.engine}
+                        className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                          res.ok
+                            ? 'bg-slate-900/90 border-emerald-500/30'
+                            : 'bg-slate-900/60 border-rose-500/30'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            {res.ok ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            ) : (
+                              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                            )}
+                            <span className="text-xs font-bold text-slate-100">
+                              {res.voiceLabel}
+                            </span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                              {res.latencyMs}ms
+                            </span>
+                          </div>
+                          {res.error && (
+                            <p className="text-[11px] text-rose-300 mt-1">
+                              {res.error}
+                            </p>
+                          )}
+                        </div>
+
+                        {res.ok && res.audioBlob && (
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                speechService.playAudioBlobDirect(
+                                  res.audioBlob!,
+                                  res.engine === 'piper_wasm' ? draftVoice.rate : 1.0
+                                )
+                              }
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors"
+                            >
+                              <Play className="w-3 h-3 fill-current" />
+                              <span>Ouvir</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDraftVoice((prev) => ({
+                                  ...prev,
+                                  ttsEngine: res.engine,
+                                }))
+                              }
+                              className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
+                                draftVoice.ttsEngine === res.engine
+                                  ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
+                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                              }`}
+                            >
+                              {draftVoice.ttsEngine === res.engine
+                                ? 'Selecionado'
+                                : 'Usar Este'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Study Method & Strict Anti-Robotic Fallback Checkboxes */}
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!draftVoice.allowSystemVoiceFallback}
+                    onChange={(e) =>
+                      setDraftVoice((prev) => ({
+                        ...prev,
+                        allowSystemVoiceFallback: !e.target.checked,
+                      }))
+                    }
+                    className="mt-1 rounded accent-emerald-500"
+                  />
+                  <div>
+                    <span className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                      <ShieldAlert className="w-3.5 h-3.5 text-emerald-400" />
+                      Bloquear Fallback Silencioso para Voz do Sistema (Google Tradutor)
+                    </span>
+                    <span className="block text-[11px] text-slate-400">
+                      Garante que o app nunca troque silenciosamente para a voz robótica do navegador se um motor falhar.
+                    </span>
+                  </div>
+                </label>
+
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -710,7 +931,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     className="mt-1 rounded accent-indigo-500"
                   />
                   <div>
-                    <span className="block text-xs font-semibold text-emerald-300">
+                    <span className="block text-xs font-semibold text-slate-200">
                       Pré-Carregamento Lookahead (Zero Latência entre Frases)
                     </span>
                     <span className="block text-[11px] text-slate-400">

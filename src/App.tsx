@@ -33,6 +33,7 @@ import {
 } from './services/storageService';
 import type {
   ConversationMessage,
+  EngineStatus,
   FlashcardItem,
   PDFDocumentData,
   PDFSentence,
@@ -83,6 +84,7 @@ export const App: React.FC = () => {
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
   const [downloadProgress, setDownloadProgress] =
     useState<VoiceModelDownloadProgress | null>(null);
+  const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
 
   // Refs to avoid stale closures inside async TTS/STT callbacks
   const docRef = useRef<PDFDocumentData>(documentData);
@@ -116,11 +118,18 @@ export const App: React.FC = () => {
     flashcardsRef.current = flashcards;
   }, [flashcards]);
 
-  // Subscribe to offline neural voice model download progress
+  // Subscribe to offline neural voice model download progress and live EngineStatus
   useEffect(() => {
-    return speechService.subscribeDownloadProgress((progress) => {
+    const unsubProgress = speechService.subscribeDownloadProgress((progress) => {
       setDownloadProgress(progress);
     });
+    const unsubEngine = speechService.subscribeEngineStatus((status) => {
+      setEngineStatus(status);
+    });
+    return () => {
+      unsubProgress();
+      unsubEngine();
+    };
   }, []);
 
   // Track active reading time for Neuroscience Dashboard
@@ -672,6 +681,45 @@ export const App: React.FC = () => {
         badgeCount={flashcards.filter((f) => !f.difficulty).length || messages.length}
       />
 
+      {/* Explicit Voice Engine Error Banner (Decision 2 = Option A: Never silently fall back to robotic browser voice) */}
+      {errorBanner && (
+        <div className="px-3 sm:px-6 py-2 bg-rose-950/90 border-b border-rose-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2 z-20">
+          <p className="text-xs text-rose-200 font-medium">{errorBanner}</p>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold transition-colors"
+            >
+              Diagnóstico de Voz
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setErrorBanner(null);
+                const fallbackSettings: VoiceSettings = {
+                  ...voiceSettingsRef.current,
+                  ttsEngine: 'browser',
+                };
+                setVoiceSettings(fallbackSettings);
+                saveVoiceSettings(fallbackSettings);
+                speakSentenceAtIndex(currentSentenceIndex);
+              }}
+              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold transition-colors"
+            >
+              Usar Voz do Sistema Mesmo Assim
+            </button>
+            <button
+              type="button"
+              onClick={() => setErrorBanner(null)}
+              className="px-2 py-1 text-[11px] text-rose-300 hover:text-white"
+            >
+              Fechar
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Floating Professor Banner when Drawer is Closed on Mobile */}
       {!isAiPanelOpen &&
         (readerState === 'thinking_ai' || readerState === 'speaking_ai') && (
@@ -806,6 +854,7 @@ export const App: React.FC = () => {
         totalPages={documentData.totalPages}
         speechRate={voiceSettings.rate}
         ttsEngine={voiceSettings.ttsEngine}
+        engineStatus={engineStatus}
         downloadProgress={downloadProgress}
         interimTranscript={interimTranscript}
         onTogglePlayPause={handleTogglePlayPause}
@@ -846,6 +895,7 @@ export const App: React.FC = () => {
           saveVoiceSettings(newVoice);
         }}
         downloadProgress={downloadProgress}
+        engineStatus={engineStatus}
       />
 
       {/* Neuroscience of the Method Modal (Endomarketing & Live Study Telemetry) */}

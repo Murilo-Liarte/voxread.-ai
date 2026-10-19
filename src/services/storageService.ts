@@ -43,12 +43,17 @@ export function saveProviderConfig(config: ProviderConfig): void {
   }
 }
 
+const CURRENT_VOICE_SETTINGS_VERSION = 3;
+
 export function createDefaultVoiceSettings(): VoiceSettings {
   return {
+    settingsVersion: CURRENT_VOICE_SETTINGS_VERSION,
     ttsEngine: 'piper_wasm',
     piperVoiceId: 'pt_BR-faber-medium',
     kokoroVoiceId: 'pf_dora',
     edgeVoiceId: 'pt-BR-FranciscaNeural',
+    edgeProxyUrl: '',
+    allowSystemVoiceFallback: false,
     browserVoiceURI: '',
     geminiVoiceName: 'Kore',
     cloudVoiceId: 'nova',
@@ -69,7 +74,21 @@ export function loadVoiceSettings(): VoiceSettings {
   try {
     const raw = localStorage.getItem(VOICE_SETTINGS_KEY);
     if (!raw) return createDefaultVoiceSettings();
-    return { ...createDefaultVoiceSettings(), ...JSON.parse(raw) };
+    const parsed = JSON.parse(raw) as Partial<VoiceSettings>;
+    const defaults = createDefaultVoiceSettings();
+    const merged: VoiceSettings = { ...defaults, ...parsed };
+
+    // Migrate legacy v1/v2 saved settings that defaulted to 'browser' or lacked explicit fallback control
+    if (!parsed.settingsVersion || parsed.settingsVersion < CURRENT_VOICE_SETTINGS_VERSION) {
+      if (merged.ttsEngine === 'browser') {
+        merged.ttsEngine = 'piper_wasm';
+      }
+      merged.allowSystemVoiceFallback = false;
+      merged.settingsVersion = CURRENT_VOICE_SETTINGS_VERSION;
+      saveVoiceSettings(merged);
+    }
+
+    return merged;
   } catch {
     return createDefaultVoiceSettings();
   }
@@ -77,7 +96,10 @@ export function loadVoiceSettings(): VoiceSettings {
 
 export function saveVoiceSettings(settings: VoiceSettings): void {
   try {
-    localStorage.setItem(VOICE_SETTINGS_KEY, JSON.stringify(settings));
+    localStorage.setItem(
+      VOICE_SETTINGS_KEY,
+      JSON.stringify({ ...settings, settingsVersion: CURRENT_VOICE_SETTINGS_VERSION })
+    );
   } catch (err) {
     console.warn('Não foi possível salvar configurações de voz:', err);
   }
