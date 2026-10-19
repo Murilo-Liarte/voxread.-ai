@@ -12,6 +12,11 @@ import {
 } from '../server/llmProxy';
 import { buildReadingSystemPrompt } from '../services/llmService';
 import { pcmBase64ToWavBlob } from '../services/speechService';
+import {
+  EDGE_NEURAL_VOICES,
+  computeEdgeProsody,
+  getEdgeVoiceMeta,
+} from '../services/edgeTtsClient';
 
 describe('PDF Sentence, BBox & Estratégia/Gran Sanitizer', () => {
   it('splits paragraphs into natural sentences without breaking on common abbreviations', () => {
@@ -72,8 +77,38 @@ describe('PDF Sentence, BBox & Estratégia/Gran Sanitizer', () => {
   });
 });
 
-describe('Expressive TTS & Multi-LLM Adapter', () => {
-  it('converts Gemini 24kHz PCM base64 audio into a valid WAV Blob', () => {
+describe('Microsoft Edge Neural TTS (msedge-tts / edge-tts) & Multi-LLM Adapter', () => {
+  it('provides all 14 official pt-BR Microsoft Edge Neural voices', () => {
+    expect(EDGE_NEURAL_VOICES.length).toBe(14);
+    expect(EDGE_NEURAL_VOICES[0].id).toBe('pt-BR-FranciscaNeural');
+    const antonio = getEdgeVoiceMeta('pt-BR-AntonioNeural');
+    expect(antonio.gender).toBe('Masculina');
+    expect(antonio.shortName).toContain('Antonio');
+  });
+
+  it('computes dynamic SSML prosody strings for msedge-tts / edge-tts alerts and headings', () => {
+    const alertProsody = computeEdgeProsody(
+      1.0,
+      1.0,
+      'alert',
+      'Atenção para esta pegadinha de prova!',
+      true
+    );
+    expect(alertProsody.rateStr).toBe('-4%');
+    expect(alertProsody.pitchStr).toBe('+3Hz');
+
+    const fastProsody = computeEdgeProsody(
+      1.25,
+      1.0,
+      'normal',
+      'Texto corrido de estudo.',
+      false
+    );
+    expect(fastProsody.rateStr).toBe('+25%');
+    expect(fastProsody.pitchStr).toBe('+0Hz');
+  });
+
+  it('converts 24kHz PCM base64 audio into a valid WAV Blob', () => {
     const dummyPcm = btoa('\x00\x00\x01\x00\x02\x00\x03\x00');
     const blob = pcmBase64ToWavBlob(dummyPcm, 24000);
     expect(blob.type).toBe('audio/wav');

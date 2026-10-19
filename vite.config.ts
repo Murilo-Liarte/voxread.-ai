@@ -1,6 +1,7 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { buildProviderRequest, extractProviderText, type LlmChatRequestBody } from './src/server/llmProxy';
+import { synthesizeWithEdgeTtsNode, type EdgeTtsRequestBody } from './src/server/edgeTtsProxy';
 import type { IncomingMessage, ServerResponse } from 'http';
 
 function readRequestBody(req: IncomingMessage): Promise<string> {
@@ -77,6 +78,23 @@ function llmProxyPlugin(): Plugin {
       } catch (err: any) {
         return sendJson(res, 500, {
           error: err?.message || 'Erro interno no proxy de IA.',
+        });
+      }
+    });
+
+    middlewares.use('/api/llm/edge-tts', async (req: IncomingMessage, res: ServerResponse) => {
+      if (req.method !== 'POST') {
+        return sendJson(res, 405, { error: 'Método não permitido. Use POST.' });
+      }
+
+      try {
+        const rawBody = await readRequestBody(req);
+        const body = JSON.parse(rawBody) as EdgeTtsRequestBody;
+        const payload = await synthesizeWithEdgeTtsNode(body);
+        return sendJson(res, 200, payload);
+      } catch (err: any) {
+        return sendJson(res, 502, {
+          error: err?.message || 'Falha ao sintetizar voz via msedge-tts / edge-tts.',
         });
       }
     });

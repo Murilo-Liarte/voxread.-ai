@@ -11,10 +11,17 @@ import {
   Loader2,
   Sparkles,
   Play,
+  Radio,
 } from 'lucide-react';
 import { PROVIDERS_CATALOG, testProviderConnection } from '../services/llmService';
+import { EDGE_NEURAL_VOICES, getEdgeVoiceMeta } from '../services/edgeTtsClient';
 import { speechService } from '../services/speechService';
-import type { LLMProviderId, ProviderConfig, VoiceSettings } from '../types';
+import type {
+  EdgeNeuralVoiceId,
+  LLMProviderId,
+  ProviderConfig,
+  VoiceSettings,
+} from '../types';
 
 interface ApiKeyModalProps {
   isOpen: boolean;
@@ -47,7 +54,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   const [draftVoice, setDraftVoice] = useState<VoiceSettings>(voiceSettings);
   const [activeTab, setActiveTab] = useState<'voice' | 'ai'>('voice');
   const [showKey, setShowKey] = useState(false);
-  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [isTestingVoice, setIsTestingVoice] = useState(false);
   const [testState, setTestState] = useState<{
     loading: boolean;
     ok?: boolean;
@@ -58,23 +65,8 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
     setDraftConfig(providerConfig);
     setDraftVoice(voiceSettings);
     setTestState({ loading: false });
+    setIsTestingVoice(false);
   }, [providerConfig, voiceSettings, isOpen]);
-
-  useEffect(() => {
-    const updateVoices = () => {
-      const voices = speechService.getVoices();
-      setAvailableVoices(voices);
-      if (!draftVoice.browserVoiceURI && voices.length > 0) {
-        const best = speechService.getBestDefaultVoiceURI();
-        setDraftVoice((prev) => ({ ...prev, browserVoiceURI: best }));
-      }
-    };
-
-    updateVoices();
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.onvoiceschanged = updateVoices;
-    }
-  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -84,6 +76,10 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
     draftConfig.selectedModels[draftConfig.providerId] || currentProvider.defaultModel;
   const currentBaseUrl =
     draftConfig.customBaseUrls[draftConfig.providerId] || currentProvider.defaultBaseUrl;
+
+  const selectedEdgeVoice = getEdgeVoiceMeta(
+    draftVoice.edgeVoiceId || 'pt-BR-FranciscaNeural'
+  );
 
   const handleSelectProvider = (id: LLMProviderId) => {
     setDraftConfig((prev) => ({ ...prev, providerId: id }));
@@ -119,12 +115,13 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   };
 
   const handleTestVoiceSample = () => {
+    setIsTestingVoice(true);
     speechService.speak({
-      text: 'Atenção para esta dica de prova! Enquanto na esfera privada o particular pode fazer tudo que a lei não proíbe, na Administração Pública o gestor só age quando a lei autoriza.',
+      text: `Olá! Eu sou a voz ${selectedEdgeVoice.shortName} via Microsoft Edge TTS. Atenção para esta dica de prova: na Administração Pública, o gestor só pode agir quando a lei autoriza!`,
       blockType: 'alert',
       settings: draftVoice,
-      geminiKeyFallback: draftConfig.apiKeys.gemini,
-      openAiKeyFallback: draftConfig.apiKeys.openai,
+      onEnd: () => setIsTestingVoice(false),
+      onError: () => setIsTestingVoice(false),
     });
   };
 
@@ -145,10 +142,11 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-slate-100">
-                Voz Expressiva & Inteligência Artificial
+                Vozes Neurais Edge TTS & Inteligência Artificial
               </h2>
               <p className="text-xs text-slate-400">
-                Personalize a voz neural do Professor e conecte sua API Key favorita
+                Todas as vozes powered by <code className="text-indigo-300">msedge-tts</code> /{' '}
+                <code className="text-indigo-300">edge-tts</code> com sincronia palavra por palavra
               </p>
             </div>
           </div>
@@ -173,7 +171,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             }`}
           >
             <Volume2 className="w-4 h-4" />
-            <span>1. Motor de Voz com Emoção</span>
+            <span>1. Vozes Neurais (msedge-tts / edge-tts)</span>
           </button>
           <button
             type="button"
@@ -185,7 +183,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             }`}
           >
             <KeyRound className="w-4 h-4" />
-            <span>2. Chave de API (Gemini, OpenAI, Claude...)</span>
+            <span>2. Chave de API (Professor IA & Flashcards)</span>
           </button>
         </div>
 
@@ -194,237 +192,134 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
           {activeTab === 'voice' ? (
             <div className="space-y-5">
               <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-4">
+                {/* Protocol Selector: msedge-tts vs edge-tts */}
                 <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-indigo-400 mb-2.5">
-                    Escolha o Motor de Voz (Text-to-Speech)
-                  </label>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
+                      <Radio className="w-3.5 h-3.5" />
+                      <span>Motor Neural Microsoft Edge (100% Gratuito)</span>
+                    </label>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                      WordBoundary Sync Ativo
+                    </span>
+                  </div>
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <button
                       type="button"
                       onClick={() =>
-                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'gemini_tts' }))
+                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'msedge_tts' }))
                       }
                       className={`p-3 rounded-xl border text-left transition-all ${
-                        draftVoice.ttsEngine === 'gemini_tts'
+                        draftVoice.ttsEngine === 'msedge_tts'
                           ? 'bg-indigo-600/20 border-indigo-500 text-white'
                           : 'bg-slate-900 border-slate-800 text-slate-300'
                       }`}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold">
-                          Gemini Neural Audio (Ultra Expressiva)
+                        <span className="text-xs font-bold font-mono">msedge-tts</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-semibold">
+                          Padrão
                         </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Stream neural 24kHz MP3 com marcação exata de tempo por palavra e prosódia SSML.
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'edge_tts' }))
+                      }
+                      className={`p-3 rounded-xl border text-left transition-all ${
+                        draftVoice.ttsEngine === 'edge_tts'
+                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                          : 'bg-slate-900 border-slate-800 text-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold font-mono">edge-tts</span>
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold">
-                          Recomendado
+                          ReadAloud HD
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-400 mt-1">
-                        Usa sua própria chave do Google Gemini para gerar voz humana com entonação real de professor!
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'openai_cloud' }))
-                      }
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        draftVoice.ttsEngine === 'openai_cloud'
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
-                          : 'bg-slate-900 border-slate-800 text-slate-300'
-                      }`}
-                    >
-                      <div className="text-xs font-bold">
-                        OpenAI GPT-4o Mini TTS (Com Emoção)
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        Voz neural da OpenAI guiada por instruções de ênfase para concursos.
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'elevenlabs' }))
-                      }
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        draftVoice.ttsEngine === 'elevenlabs'
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
-                          : 'bg-slate-900 border-slate-800 text-slate-300'
-                      }`}
-                    >
-                      <div className="text-xs font-bold">
-                        ElevenLabs Multilingual v2
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        Narração de estúdio ultra-realista (requer chave ElevenLabs).
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'browser' }))
-                      }
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        draftVoice.ttsEngine === 'browser'
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
-                          : 'bg-slate-900 border-slate-800 text-slate-300'
-                      }`}
-                    >
-                      <div className="text-xs font-bold">
-                        Voz Neural do Navegador + Prosódia Ativa
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        100% offline/gratuita com modulação dinâmica de tom em alertas e títulos.
+                        Protocolo Universal Edge ReadAloud com legendas sincronizadas em tempo real.
                       </p>
                     </button>
                   </div>
                 </div>
 
-                {/* Engine-Specific Voice Selection */}
-                {draftVoice.ttsEngine === 'gemini_tts' && (
-                  <div className="space-y-2 pt-1">
-                    <label className="block text-xs font-medium text-slate-300">
-                      Timbre da Voz Neural Gemini
-                    </label>
-                    <select
-                      value={draftVoice.geminiVoiceName || 'Kore'}
-                      onChange={(e) =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          geminiVoiceName: e.target.value as any,
-                        }))
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                    >
-                      <option value="Kore">Kore (Feminina calorosa, firme e muito didática)</option>
-                      <option value="Aoede">Aoede (Feminina expressiva e natural)</option>
-                      <option value="Puck">Puck (Masculina dinâmica e entusiasmada)</option>
-                      <option value="Charon">Charon (Masculina serena e articulada)</option>
-                      <option value="Fenrir">Fenrir (Masculina grave com presença de aula)</option>
-                    </select>
-                    {!draftConfig.apiKeys.gemini && (
-                      <p className="text-[11px] text-amber-300">
-                        💡 Dica: Insira sua chave gratuita do Google Gemini na aba "2. Chave de API" para ativar esta voz neural!
-                      </p>
-                    )}
+                {/* Quick Pick Cards for Top 4 Voices */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-2">
+                    Vozes Neurais em Destaque (Português do Brasil)
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {EDGE_NEURAL_VOICES.slice(0, 4).map((v) => {
+                      const isSelected = draftVoice.edgeVoiceId === v.id;
+                      return (
+                        <button
+                          key={v.id}
+                          type="button"
+                          onClick={() =>
+                            setDraftVoice((prev) => ({ ...prev, edgeVoiceId: v.id }))
+                          }
+                          className={`p-2.5 rounded-xl border text-left transition-all ${
+                            isSelected
+                              ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-sm'
+                              : 'bg-slate-900/80 border-slate-800 text-slate-300 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-bold">{v.shortName}</span>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-indigo-300 font-medium">
+                              {v.styleTag}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-1 line-clamp-2">
+                            {v.description}
+                          </p>
+                        </button>
+                      );
+                    })}
                   </div>
-                )}
+                </div>
 
-                {draftVoice.ttsEngine === 'openai_cloud' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1">
-                        Voz OpenAI
-                      </label>
-                      <select
-                        value={draftVoice.cloudVoiceId}
-                        onChange={(e) =>
-                          setDraftVoice((prev) => ({
-                            ...prev,
-                            cloudVoiceId: e.target.value as any,
-                          }))
-                        }
-                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                      >
-                        <option value="nova">Nova (Feminina enérgica e clara)</option>
-                        <option value="shimmer">Shimmer (Feminina expressiva)</option>
-                        <option value="onyx">Onyx (Masculina grave de professor)</option>
-                        <option value="alloy">Alloy (Equilibrada)</option>
-                        <option value="echo">Echo (Didática e pausada)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1">
-                        API Key OpenAI (para Áudio)
-                      </label>
-                      <input
-                        type="password"
-                        value={draftVoice.openAiTtsApiKey || draftConfig.apiKeys.openai || ''}
-                        onChange={(e) =>
-                          setDraftVoice((prev) => ({
-                            ...prev,
-                            openAiTtsApiKey: e.target.value,
-                          }))
-                        }
-                        placeholder="sk-proj-..."
-                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
+                {/* Full 14-Voice Catalog Dropdown */}
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Catálogo Completo de Vozes Microsoft Edge TTS ({EDGE_NEURAL_VOICES.length}{' '}
+                    vozes neurais pt-BR)
+                  </label>
+                  <select
+                    value={draftVoice.edgeVoiceId || 'pt-BR-FranciscaNeural'}
+                    onChange={(e) =>
+                      setDraftVoice((prev) => ({
+                        ...prev,
+                        edgeVoiceId: e.target.value as EdgeNeuralVoiceId,
+                      }))
+                    }
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
+                  >
+                    {EDGE_NEURAL_VOICES.map((voice) => (
+                      <option key={voice.id} value={voice.id}>
+                        {voice.label} — [{voice.id}]
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-slate-400 mt-1.5">
+                    🎙️ <strong className="text-slate-200">{selectedEdgeVoice.shortName}:</strong>{' '}
+                    {selectedEdgeVoice.description}
+                  </p>
+                </div>
 
-                {draftVoice.ttsEngine === 'elevenlabs' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1">
-                        API Key ElevenLabs
-                      </label>
-                      <input
-                        type="password"
-                        value={draftVoice.elevenLabsApiKey || ''}
-                        onChange={(e) =>
-                          setDraftVoice((prev) => ({
-                            ...prev,
-                            elevenLabsApiKey: e.target.value,
-                          }))
-                        }
-                        placeholder="xi-api-key..."
-                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1">
-                        Voice ID (ElevenLabs)
-                      </label>
-                      <input
-                        type="text"
-                        value={draftVoice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL'}
-                        onChange={(e) =>
-                          setDraftVoice((prev) => ({
-                            ...prev,
-                            elevenLabsVoiceId: e.target.value,
-                          }))
-                        }
-                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {draftVoice.ttsEngine === 'browser' && (
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Voz Neural do Dispositivo (Vozes "Natural / Neural" ranqueadas no topo)
-                    </label>
-                    <select
-                      value={draftVoice.browserVoiceURI}
-                      onChange={(e) =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          browserVoiceURI: e.target.value,
-                        }))
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                    >
-                      {availableVoices.length === 0 && (
-                        <option value="">Voz padrão do sistema (pt-BR)</option>
-                      )}
-                      {availableVoices.map((v) => (
-                        <option key={v.voiceURI} value={v.voiceURI}>
-                          {v.name} ({v.lang})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-
-                {/* Speed & Test Sample */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                {/* Speed, Pitch & Test Sample */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
                   <div>
                     <div className="flex justify-between text-xs mb-1">
-                      <span className="text-slate-300 font-medium">Velocidade da Aula</span>
+                      <span className="text-slate-300 font-medium">Velocidade</span>
                       <span className="text-indigo-400 font-bold">
                         {draftVoice.rate.toFixed(2)}x
                       </span>
@@ -445,14 +340,46 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     />
                   </div>
 
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-300 font-medium">Tom (Pitch SSML)</span>
+                      <span className="text-indigo-400 font-bold">
+                        {draftVoice.pitch.toFixed(2)}x
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.85"
+                      max="1.15"
+                      step="0.02"
+                      value={draftVoice.pitch}
+                      onChange={(e) =>
+                        setDraftVoice((prev) => ({
+                          ...prev,
+                          pitch: parseFloat(e.target.value),
+                        }))
+                      }
+                      className="w-full accent-indigo-500"
+                    />
+                  </div>
+
                   <div className="flex items-end">
                     <button
                       type="button"
                       onClick={handleTestVoiceSample}
                       className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-200 border border-indigo-500/40 text-xs font-bold transition-colors"
                     >
-                      <Play className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Testar Entonação da Voz</span>
+                      {isTestingVoice ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                          <span>Falando...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Play className="w-3.5 h-3.5 text-indigo-400" />
+                          <span>Testar Voz Edge</span>
+                        </>
+                      )}
                     </button>
                   </div>
                 </div>
@@ -460,6 +387,28 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
               {/* Study Method Checkboxes */}
               <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draftVoice.expressiveProsody !== false}
+                    onChange={(e) =>
+                      setDraftVoice((prev) => ({
+                        ...prev,
+                        expressiveProsody: e.target.checked,
+                      }))
+                    }
+                    className="mt-1 rounded accent-indigo-500"
+                  />
+                  <div>
+                    <span className="block text-xs font-semibold text-slate-200">
+                      Prosódia Expressiva Automática (SSML Edge TTS)
+                    </span>
+                    <span className="block text-[11px] text-slate-400">
+                      Ajusta automaticamente a ênfase e cadência da voz neural ao ler alertas de prova, títulos de capítulo e perguntas.
+                    </span>
+                  </div>
+                </label>
+
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -477,7 +426,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                       Pausa Automática para Flashcards ao Fim de Cada Tópico (Active Recall)
                     </span>
                     <span className="block text-[11px] text-slate-400">
-                      Ao concluir um tópico da apostila, pausa a leitura e lança 2 a 3 perguntas de fixação na aba lateral.
+                      Ao concluir um tópico da apostila, pausa a leitura e lança perguntas de fixação na aba lateral.
                     </span>
                   </div>
                 </label>
