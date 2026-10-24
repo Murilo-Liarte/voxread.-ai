@@ -27,20 +27,38 @@ export interface ProviderConfig {
   customBaseUrls: Partial<Record<LLMProviderId, string>>;
 }
 
-export type TtsEngineMode =
-  | 'gemini_tts'
-  | 'openai_cloud'
-  | 'elevenlabs'
-  | 'browser';
+export type EdgeNeuralVoiceId =
+  | 'pt-BR-FranciscaNeural'
+  | 'pt-BR-AntonioNeural'
+  | 'pt-BR-ThalitaMultilingualNeural'
+  | 'pt-BR-BrendaNeural'
+  | 'pt-BR-DonatoNeural'
+  | 'pt-BR-GiovannaNeural'
+  | 'pt-BR-HumbertoNeural'
+  | 'pt-BR-JulioNeural'
+  | 'pt-BR-LeilaNeural'
+  | 'pt-BR-LeticiaNeural'
+  | 'pt-BR-ManuelaNeural'
+  | 'pt-BR-NicolauNeural'
+  | 'pt-BR-ValerioNeural'
+  | 'pt-BR-YaraNeural';
+
+export interface EdgeVoiceMetadata {
+  id: EdgeNeuralVoiceId;
+  shortName: string;
+  label: string;
+  gender: 'Feminina' | 'Masculina';
+  styleTag: string;
+  description: string;
+  recommended?: boolean;
+}
+
+export type TtsEngineMode = 'msedge_tts' | 'edge_tts';
 
 export interface VoiceSettings {
   ttsEngine: TtsEngineMode;
+  edgeVoiceId: EdgeNeuralVoiceId;
   browserVoiceURI: string;
-  geminiVoiceName: 'Kore' | 'Aoede' | 'Puck' | 'Charon' | 'Fenrir';
-  cloudVoiceId: 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer';
-  elevenLabsVoiceId: string;
-  elevenLabsApiKey?: string;
-  openAiTtsApiKey?: string;
   rate: number; // 0.75 to 2.0
   pitch: number; // 0.8 to 1.2
   expressiveProsody: boolean;

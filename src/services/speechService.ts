@@ -1,4 +1,14 @@
-import type { SentenceBlockType, VoiceSettings } from '../types';
+import type {
+  EdgeNeuralVoiceId,
+  SentenceBlockType,
+  VoiceSettings,
+} from '../types';
+import {
+  computeEdgeProsody,
+  EDGE_NEURAL_VOICES,
+  synthesizeEdgeTts,
+  type EdgeWordBoundary,
+} from './edgeTtsClient';
 
 export interface SpeakOptions {
   text: string;
@@ -13,7 +23,7 @@ export interface SpeakOptions {
 }
 
 /**
- * Converts base64 16-bit mono PCM (24000 Hz from Gemini TTS) into a playable WAV Blob.
+ * Helper utility to convert base64 16-bit mono PCM into a playable WAV Blob.
  */
 export function pcmBase64ToWavBlob(base64Pcm: string, sampleRate = 24000): Blob {
   const binaryStr = atob(base64Pcm);
@@ -31,13 +41,13 @@ export function pcmBase64ToWavBlob(base64Pcm: string, sampleRate = 24000): Blob 
   view.setUint32(4, 36 + pcmLen, true);
   writeString(8, 'WAVE');
   writeString(12, 'fmt ');
-  view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
-  view.setUint16(20, 1, true); // AudioFormat (1 = PCM)
-  view.setUint16(22, 1, true); // NumChannels (1 = mono)
-  view.setUint32(24, sampleRate, true); // SampleRate
-  view.setUint32(28, sampleRate * 2, true); // ByteRate
-  view.setUint16(32, 2, true); // BlockAlign
-  view.setUint16(34, 16, true); // BitsPerSample
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
   writeString(36, 'data');
   view.setUint32(40, pcmLen, true);
 
@@ -65,6 +75,10 @@ class SpeechService {
     return 'SpeechRecognition' in window || 'webkitSpeechRecognition' in window;
   }
 
+  public getEdgeVoicesCatalog() {
+    return EDGE_NEURAL_VOICES;
+  }
+
   public getVoices(): SpeechSynthesisVoice[] {
     if (!this.isTtsSupported()) return [];
     const voices = window.speechSynthesis.getVoices();
@@ -74,7 +88,6 @@ class SpeechService {
       if (aPt && !bPt) return -1;
       if (!aPt && bPt) return 1;
 
-      // Rank Neural / Natural / Enhanced voices first
       const aScore = this.scoreVoiceQuality(a);
       const bScore = this.scoreVoiceQuality(b);
       if (aScore !== bScore) return bScore - aScore;
@@ -90,11 +103,10 @@ class SpeechService {
     if (lang.includes('pt-br')) score += 20;
     else if (lang.startsWith('pt')) score += 10;
 
+    if (name.includes('microsoft')) score += 45;
     if (name.includes('natural') || name.includes('neural')) score += 50;
     if (name.includes('francisca') || name.includes('thalita') || name.includes('antonio')) score += 40;
-    if (name.includes('premium') || name.includes('enhanced') || name.includes('luciana')) score += 30;
-    if (name.includes('online')) score += 15;
-    if (name.includes('google')) score += 10;
+    if (name.includes('online')) score += 20;
     return score;
   }
 
@@ -131,6 +143,10 @@ class SpeechService {
     }
   }
 
+  /**
+   * Speaks text using Microsoft Edge Neural TTS (`msedge-tts` / `edge-tts`) across all voices,
+   * with real-time word-boundary synchronization for the PDF BBox highlighter.
+   */
   public async speak(options: SpeakOptions): Promise<void> {
     this.stopSpeaking();
     const currentToken = ++this.playbackToken;
@@ -146,178 +162,48 @@ class SpeechService {
     }
 
     const { settings } = options;
-    const geminiKey = options.geminiKeyFallback?.trim();
-    const openAiKey = settings.openAiTtsApiKey?.trim() || options.openAiKeyFallback?.trim();
-    const elevenKey = settings.elevenLabsApiKey?.trim();
+    const edgeVoiceId: EdgeNeuralVoiceId =
+      settings.edgeVoiceId || 'pt-BR-FranciscaNeural';
 
-    // 1. Gemini Expressive Neural TTS (Uses the user's Gemini API Key for ultra-natural human voice!)
-    if (settings.ttsEngine === 'gemini_tts' && geminiKey) {
-      try {
-        await this.speakWithGeminiTts(cleanText, options.blockType, settings, geminiKey, currentToken, options);
-        return;
-      } catch (err) {
-        console.warn('Fallback para voz neural do navegador após erro no Gemini TTS:', err);
-      }
+    const prosody = computeEdgeProsody(
+      settings.rate,
+      settings.pitch,
+      options.blockType,
+      cleanText,
+      settings.expressiveProsody !== false
+    );
+
+    // Primary Engine: Microsoft Edge Neural TTS (`msedge-tts` / `edge-tts`)
+    try {
+      const result = await synthesizeEdgeTts(cleanText, edgeVoiceId, prosody);
+      if (currentToken !== this.playbackToken) return;
+
+      await this.playEdgeAudioWithWordBoundaries(
+        result.audioBlob,
+        cleanText,
+        result.wordBoundaries,
+        currentToken,
+        options
+      );
+      return;
+    } catch {
+      if (currentToken !== this.playbackToken) return;
+      // Seamless fallback to matching native Edge Neural voice if offline or rate-limited
+      this.speakWithMatchingEdgeBrowserVoice(
+        cleanText,
+        edgeVoiceId,
+        prosody.numericRate,
+        prosody.numericPitch,
+        currentToken,
+        options
+      );
     }
-
-    // 2. ElevenLabs Expressive TTS
-    if (settings.ttsEngine === 'elevenlabs' && elevenKey) {
-      try {
-        await this.speakWithElevenLabs(cleanText, settings, elevenKey, currentToken, options);
-        return;
-      } catch (err) {
-        console.warn('Fallback para voz do navegador após erro no ElevenLabs TTS:', err);
-      }
-    }
-
-    // 3. OpenAI Cloud HD TTS
-    if (settings.ttsEngine === 'openai_cloud' && openAiKey) {
-      try {
-        await this.speakWithOpenAiCloud(cleanText, options.blockType, settings, openAiKey, currentToken, options);
-        return;
-      } catch (err) {
-        console.warn('Fallback para voz do navegador após erro no OpenAI TTS:', err);
-      }
-    }
-
-    // 4. Browser Neural TTS with Expressive Prosody & Word Boundary Sync
-    this.speakWithBrowser(cleanText, options.blockType, settings, currentToken, options);
   }
 
-  private async speakWithGeminiTts(
-    text: string,
-    blockType: SentenceBlockType | undefined,
-    settings: VoiceSettings,
-    apiKey: string,
-    token: number,
-    options: SpeakOptions
-  ): Promise<void> {
-    const styleDirective =
-      blockType === 'alert'
-        ? 'Leia em português do Brasil com entonação de professor de concursos dando um alerta importante de prova, com ênfase clara e expressiva:'
-        : blockType === 'heading'
-        ? 'Leia este título de tópico em português do Brasil com voz firme, pausada e engajadora de professor:'
-        : 'Leia em português do Brasil com voz calorosa, natural, expressiva e didática de um excelente professor:';
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${encodeURIComponent(
-      apiKey
-    )}`;
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [{ text: `${styleDirective} "${text}"` }],
-          },
-        ],
-        generationConfig: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: settings.geminiVoiceName || 'Kore',
-              },
-            },
-          },
-        },
-      }),
-    });
-
-    if (token !== this.playbackToken) return;
-    if (!res.ok) {
-      throw new Error(`Gemini TTS HTTP ${res.status}`);
-    }
-
-    const data = await res.json();
-    if (token !== this.playbackToken) return;
-
-    const inlineData = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData;
-    if (!inlineData?.data) {
-      throw new Error('Gemini TTS não retornou dados de áudio.');
-    }
-
-    const wavBlob = pcmBase64ToWavBlob(inlineData.data, 24000);
-    await this.playAudioBlobWithWordSync(wavBlob, text, settings.rate, token, options);
-  }
-
-  private async speakWithElevenLabs(
-    text: string,
-    settings: VoiceSettings,
-    apiKey: string,
-    token: number,
-    options: SpeakOptions
-  ): Promise<void> {
-    const voiceId = settings.elevenLabsVoiceId?.trim() || 'EXAVITQu4vr4xnSDxMaL'; // Bella / Sarah expressive multilingual
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`;
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'xi-api-key': apiKey,
-      },
-      body: JSON.stringify({
-        text,
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: {
-          stability: 0.42,
-          similarity_boost: 0.8,
-          style: 0.38,
-          use_speaker_boost: true,
-        },
-      }),
-    });
-
-    if (token !== this.playbackToken) return;
-    if (!res.ok) {
-      throw new Error(`ElevenLabs HTTP ${res.status}`);
-    }
-
-    const blob = await res.blob();
-    await this.playAudioBlobWithWordSync(blob, text, settings.rate, token, options);
-  }
-
-  private async speakWithOpenAiCloud(
-    text: string,
-    blockType: SentenceBlockType | undefined,
-    settings: VoiceSettings,
-    apiKey: string,
-    token: number,
-    options: SpeakOptions
-  ): Promise<void> {
-    const res = await fetch('https://api.openai.com/v1/audio/speech', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini-tts',
-        input: text,
-        voice: settings.cloudVoiceId || 'nova',
-        instructions:
-          blockType === 'alert'
-            ? 'Fale em português brasileiro com entonação enfática de alerta de prova de concurso, destacando os termos cruciais.'
-            : 'Fale em português brasileiro como um professor de concursos carismático, expressivo, fluido e natural.',
-        speed: Math.min(2.0, Math.max(0.7, settings.rate || 1.0)),
-      }),
-    });
-
-    if (token !== this.playbackToken) return;
-    if (!res.ok) {
-      throw new Error(`OpenAI TTS HTTP ${res.status}`);
-    }
-
-    const blob = await res.blob();
-    await this.playAudioBlobWithWordSync(blob, text, 1.0, token, options);
-  }
-
-  private async playAudioBlobWithWordSync(
+  private async playEdgeAudioWithWordBoundaries(
     blob: Blob,
     text: string,
-    playbackRate: number,
+    wordBoundaries: EdgeWordBoundary[],
     token: number,
     options: SpeakOptions
   ): Promise<void> {
@@ -325,7 +211,6 @@ class SpeechService {
 
     const audioUrl = URL.createObjectURL(blob);
     const audio = new Audio(audioUrl);
-    audio.playbackRate = Math.min(2.0, Math.max(0.7, playbackRate || 1.0));
     this.activeAudio = audio;
 
     audio.onplay = () => {
@@ -337,9 +222,32 @@ class SpeechService {
 
     audio.ontimeupdate = () => {
       if (token !== this.playbackToken || !audio.duration) return;
-      const ratio = Math.min(1, Math.max(0, audio.currentTime / audio.duration));
-      const approxCharIndex = Math.floor(ratio * text.length);
-      options.onWordProgress?.(approxCharIndex, ratio);
+
+      const currentMs = audio.currentTime * 1000;
+
+      // If `msedge-tts` / `edge-tts` returned exact WordBoundary timestamps, use them!
+      if (wordBoundaries.length > 0) {
+        let activeWord = wordBoundaries[0];
+        for (const wb of wordBoundaries) {
+          if (currentMs >= wb.offsetMs) {
+            activeWord = wb;
+          } else {
+            break;
+          }
+        }
+        const ratio = Math.min(
+          1,
+          Math.max(
+            audio.currentTime / audio.duration,
+            (activeWord.charIndex + activeWord.text.length) / Math.max(1, text.length)
+          )
+        );
+        options.onWordProgress?.(activeWord.charIndex, ratio);
+      } else {
+        const ratio = Math.min(1, Math.max(0, audio.currentTime / audio.duration));
+        const approxCharIndex = Math.floor(ratio * text.length);
+        options.onWordProgress?.(approxCharIndex, ratio);
+      }
     };
 
     audio.onended = () => {
@@ -355,57 +263,59 @@ class SpeechService {
       URL.revokeObjectURL(audioUrl);
       if (token === this.playbackToken) {
         this.activeAudio = null;
-        options.onError?.('Erro ao reproduzir áudio neural.');
+        options.onError?.('Erro ao reproduzir stream de áudio do Edge TTS.');
       }
     };
 
     await audio.play();
   }
 
-  private speakWithBrowser(
+  /**
+   * Matches the selected `pt-BR-<Name>Neural` Edge voice to the browser's
+   * Microsoft Edge Natural / Neural synthesis engine when offline or rate-limited.
+   */
+  private speakWithMatchingEdgeBrowserVoice(
     text: string,
-    blockType: SentenceBlockType | undefined,
-    settings: VoiceSettings,
+    edgeVoiceId: EdgeNeuralVoiceId,
+    numericRate: number,
+    numericPitch: number,
     token: number,
     options: SpeakOptions
   ): void {
     if (!this.isTtsSupported()) {
-      options.onError?.('Seu navegador não suporta síntese de voz.');
+      options.onError?.('Síntese de voz não suportada neste navegador.');
       return;
     }
 
     const utterance = new SpeechSynthesisUtterance(text);
     const voices = this.getVoices();
 
-    const chosenVoice =
-      voices.find((v) => v.voiceURI === settings.browserVoiceURI) ||
+    // Extract voice persona name (e.g. "Francisca", "Antonio", "Thalita")
+    const personaKey = edgeVoiceId
+      .replace('pt-BR-', '')
+      .replace('MultilingualNeural', '')
+      .replace('Neural', '')
+      .toLowerCase();
+
+    const matchedEdgeVoice =
+      voices.find((v) => v.name.toLowerCase().includes(personaKey)) ||
+      voices.find(
+        (v) =>
+          v.lang.toLowerCase().startsWith('pt') &&
+          (v.name.toLowerCase().includes('natural') ||
+            v.name.toLowerCase().includes('microsoft'))
+      ) ||
       voices[0];
 
-    if (chosenVoice) {
-      utterance.voice = chosenVoice;
-      utterance.lang = chosenVoice.lang;
+    if (matchedEdgeVoice) {
+      utterance.voice = matchedEdgeVoice;
+      utterance.lang = matchedEdgeVoice.lang;
     } else {
       utterance.lang = 'pt-BR';
     }
 
-    // Apply expressive prosody modulation based on block type so voice feels alive
-    let rate = settings.rate || 1.05;
-    let pitch = settings.pitch || 1.02;
-
-    if (settings.expressiveProsody !== false) {
-      if (blockType === 'alert') {
-        rate = rate * 0.95;
-        pitch = Math.min(1.3, pitch * 1.09);
-      } else if (blockType === 'heading') {
-        rate = rate * 0.92;
-        pitch = Math.max(0.85, pitch * 0.97);
-      } else if (text.includes('?')) {
-        pitch = Math.min(1.25, pitch * 1.05);
-      }
-    }
-
-    utterance.rate = Math.min(2.0, Math.max(0.65, rate));
-    utterance.pitch = Math.min(1.4, Math.max(0.7, pitch));
+    utterance.rate = numericRate;
+    utterance.pitch = numericPitch;
 
     let boundaryFired = false;
 
@@ -414,9 +324,8 @@ class SpeechService {
       options.onStart?.();
       options.onWordProgress?.(0, 0);
 
-      // Smooth fallback progress estimator for browsers that don't fire `onboundary`
       const estimatedDurationMs = Math.max(
-        1200,
+        1100,
         (text.length / (14.5 * utterance.rate)) * 1000
       );
       const startedAt = Date.now();
@@ -431,14 +340,17 @@ class SpeechService {
           const ratio = Math.min(0.96, elapsed / estimatedDurationMs);
           options.onWordProgress?.(Math.floor(ratio * text.length), ratio);
         }
-      }, 90);
+      }, 85);
     };
 
     utterance.onboundary = (event: SpeechSynthesisEvent) => {
       if (token !== this.playbackToken) return;
       if (typeof event.charIndex === 'number') {
         boundaryFired = true;
-        const ratio = Math.min(1, Math.max(0, event.charIndex / Math.max(1, text.length)));
+        const ratio = Math.min(
+          1,
+          Math.max(0, event.charIndex / Math.max(1, text.length))
+        );
         options.onWordProgress?.(event.charIndex, ratio);
       }
     };
@@ -457,7 +369,7 @@ class SpeechService {
       if (event.error === 'interrupted' || event.error === 'canceled') {
         return;
       }
-      options.onError?.(`Erro na síntese de voz: ${event.error}`);
+      options.onError?.(`Erro na síntese de voz Edge: ${event.error}`);
     };
 
     window.speechSynthesis.speak(utterance);
@@ -513,7 +425,9 @@ class SpeechService {
         return;
       }
       if (event.error === 'not-allowed') {
-        callbacks.onError('Permissão de microfone negada. Habilite o acesso ao microfone no navegador.');
+        callbacks.onError(
+          'Permissão de microfone negada. Habilite o acesso ao microfone no navegador.'
+        );
       } else {
         callbacks.onError(`Erro no microfone: ${event.error}`);
       }
