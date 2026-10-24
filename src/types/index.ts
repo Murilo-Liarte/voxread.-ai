@@ -27,41 +27,51 @@ export interface ProviderConfig {
   customBaseUrls: Partial<Record<LLMProviderId, string>>;
 }
 
+export type TtsEngineMode =
+  | 'piper_wasm'
+  | 'kokoro_webgpu'
+  | 'edge_neural'
+  | 'gemini_tts'
+  | 'openai_cloud'
+  | 'elevenlabs'
+  | 'browser';
+
+export type PiperVoiceId =
+  | 'pt_BR-faber-medium'
+  | 'pt_BR-edresson-low'
+  | 'pt_PT-tugão-medium';
+
+export type KokoroPtVoiceId = 'pf_dora' | 'pm_alex' | 'pm_santa';
+
 export type EdgeNeuralVoiceId =
   | 'pt-BR-FranciscaNeural'
   | 'pt-BR-AntonioNeural'
-  | 'pt-BR-ThalitaMultilingualNeural'
-  | 'pt-BR-BrendaNeural'
-  | 'pt-BR-DonatoNeural'
-  | 'pt-BR-GiovannaNeural'
-  | 'pt-BR-HumbertoNeural'
-  | 'pt-BR-JulioNeural'
-  | 'pt-BR-LeilaNeural'
-  | 'pt-BR-LeticiaNeural'
-  | 'pt-BR-ManuelaNeural'
-  | 'pt-BR-NicolauNeural'
-  | 'pt-BR-ValerioNeural'
-  | 'pt-BR-YaraNeural';
+  | 'pt-BR-ThalitaMultilingualNeural';
 
-export interface EdgeVoiceMetadata {
-  id: EdgeNeuralVoiceId;
-  shortName: string;
-  label: string;
-  gender: 'Feminina' | 'Masculina';
-  styleTag: string;
-  description: string;
-  recommended?: boolean;
+export interface VoiceModelDownloadProgress {
+  engine: TtsEngineMode;
+  voiceId: string;
+  percent: number;
+  statusText: string;
+  isDownloading: boolean;
+  isReady: boolean;
 }
-
-export type TtsEngineMode = 'msedge_tts' | 'edge_tts';
 
 export interface VoiceSettings {
   ttsEngine: TtsEngineMode;
+  piperVoiceId: PiperVoiceId;
+  kokoroVoiceId: KokoroPtVoiceId;
   edgeVoiceId: EdgeNeuralVoiceId;
   browserVoiceURI: string;
+  geminiVoiceName: 'Kore' | 'Aoede' | 'Puck' | 'Charon' | 'Fenrir';
+  cloudVoiceId: 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer';
+  elevenLabsVoiceId: string;
+  elevenLabsApiKey?: string;
+  openAiTtsApiKey?: string;
   rate: number; // 0.75 to 2.0
   pitch: number; // 0.8 to 1.2
   expressiveProsody: boolean;
+  prefetchNextSentence: boolean;
   autoResumeAfterAnswer: boolean;
   autoFlashcardsOnTopicEnd: boolean;
   sanitizeHeadersFooters: boolean;

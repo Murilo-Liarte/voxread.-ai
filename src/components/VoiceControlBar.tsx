@@ -8,8 +8,13 @@ import {
   MicOff,
   Loader2,
   CornerDownRight,
+  Cpu,
 } from 'lucide-react';
-import type { ReaderState } from '../types';
+import type {
+  ReaderState,
+  TtsEngineMode,
+  VoiceModelDownloadProgress,
+} from '../types';
 
 interface VoiceControlBarProps {
   readerState: ReaderState;
@@ -18,26 +23,42 @@ interface VoiceControlBarProps {
   currentPage: number;
   totalPages: number;
   speechRate: number;
+  ttsEngine: TtsEngineMode;
+  downloadProgress?: VoiceModelDownloadProgress | null;
   interimTranscript: string;
   onTogglePlayPause: () => void;
   onPrevSentence: () => void;
   onNextSentence: () => void;
   onCycleSpeed: () => void;
+  onOpenVoiceSettings: () => void;
   onInterruptWithVoice: () => void;
   onStopVoiceListening: () => void;
   onResumeReadingNow: () => void;
 }
+
+const ENGINE_LABELS: Record<TtsEngineMode, string> = {
+  piper_wasm: 'Piper Neural Offline',
+  kokoro_webgpu: 'Kokoro-82M Neural',
+  edge_neural: 'Edge Neural Studio',
+  gemini_tts: 'Gemini Audio',
+  openai_cloud: 'OpenAI Neural',
+  elevenlabs: 'ElevenLabs',
+  browser: 'Sistema',
+};
 
 export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
   readerState,
   currentSentenceIndex,
   totalSentences,
   speechRate,
+  ttsEngine,
+  downloadProgress,
   interimTranscript,
   onTogglePlayPause,
   onPrevSentence,
   onNextSentence,
   onCycleSpeed,
+  onOpenVoiceSettings,
   onInterruptWithVoice,
   onStopVoiceListening,
   onResumeReadingNow,
@@ -68,6 +89,29 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
         />
       </div>
 
+      {/* Offline Neural Voice Model Download Progress Banner */}
+      {downloadProgress?.isDownloading && (
+        <div className="px-3 py-1.5 bg-indigo-950/90 border-b border-indigo-500/30 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <Loader2 className="w-3.5 h-3.5 text-emerald-400 animate-spin shrink-0" />
+            <span className="text-xs font-medium text-indigo-100 truncate">
+              {downloadProgress.statusText}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="w-24 sm:w-36 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all duration-200"
+                style={{ width: `${downloadProgress.percent}%` }}
+              />
+            </div>
+            <span className="text-[11px] font-mono font-bold text-emerald-300">
+              {downloadProgress.percent}%
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Live Voice Transcript Banner when Listening */}
       {isListeningUser && (
         <div className="px-3 py-1.5 bg-rose-600/20 border-b border-rose-500/30 flex items-center justify-between gap-2">
@@ -91,8 +135,8 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
 
       {/* Single-Row Floating Assistant & Player Bar */}
       <div className="h-14 px-3 sm:px-6 flex items-center justify-between gap-2 max-w-6xl mx-auto">
-        {/* Left: Animated Soundwave Indicator + Speed */}
-        <div className="flex items-center gap-2.5">
+        {/* Left: Animated Soundwave Indicator + Speed + Engine Badge */}
+        <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={onCycleSpeed}
@@ -100,6 +144,16 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
             title="Alterar velocidade de leitura (1.0x, 1.15x, 1.3x, 1.5x)"
           >
             {speechRate.toFixed(2)}x
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenVoiceSettings}
+            className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold transition-colors"
+            title="Trocar motor de voz neural (Piper Offline, Kokoro-82M, Edge Neural)"
+          >
+            <Cpu className="w-3.5 h-3.5 text-emerald-400" />
+            <span>{ENGINE_LABELS[ttsEngine] || 'Voz Neural'}</span>
           </button>
 
           {/* Animated Audio Waveform Indicator */}

@@ -45,12 +45,20 @@ export function saveProviderConfig(config: ProviderConfig): void {
 
 export function createDefaultVoiceSettings(): VoiceSettings {
   return {
-    ttsEngine: 'msedge_tts',
+    ttsEngine: 'piper_wasm',
+    piperVoiceId: 'pt_BR-faber-medium',
+    kokoroVoiceId: 'pf_dora',
     edgeVoiceId: 'pt-BR-FranciscaNeural',
     browserVoiceURI: '',
+    geminiVoiceName: 'Kore',
+    cloudVoiceId: 'nova',
+    elevenLabsVoiceId: 'EXAVITQu4vr4xnSDxMaL',
+    elevenLabsApiKey: '',
+    openAiTtsApiKey: '',
     rate: 1.05,
-    pitch: 1.0,
+    pitch: 1.02,
     expressiveProsody: true,
+    prefetchNextSentence: true,
     autoResumeAfterAnswer: true,
     autoFlashcardsOnTopicEnd: true,
     sanitizeHeadersFooters: true,
@@ -61,18 +69,7 @@ export function loadVoiceSettings(): VoiceSettings {
   try {
     const raw = localStorage.getItem(VOICE_SETTINGS_KEY);
     if (!raw) return createDefaultVoiceSettings();
-    const parsed = JSON.parse(raw);
-    const defaults = createDefaultVoiceSettings();
-    const validEngine =
-      parsed.ttsEngine === 'msedge_tts' || parsed.ttsEngine === 'edge_tts'
-        ? parsed.ttsEngine
-        : 'msedge_tts';
-    return {
-      ...defaults,
-      ...parsed,
-      ttsEngine: validEngine,
-      edgeVoiceId: parsed.edgeVoiceId || defaults.edgeVoiceId,
-    };
+    return { ...createDefaultVoiceSettings(), ...JSON.parse(raw) };
   } catch {
     return createDefaultVoiceSettings();
   }
