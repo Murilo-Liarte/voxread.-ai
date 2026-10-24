@@ -45,7 +45,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 }) => {
   const [draftConfig, setDraftConfig] = useState<ProviderConfig>(providerConfig);
   const [draftVoice, setDraftVoice] = useState<VoiceSettings>(voiceSettings);
-  const [activeTab, setActiveTab] = useState<'ai' | 'voice'>('ai');
+  const [activeTab, setActiveTab] = useState<'voice' | 'ai'>('voice');
   const [showKey, setShowKey] = useState(false);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [testState, setTestState] = useState<{
@@ -120,8 +120,10 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
   const handleTestVoiceSample = () => {
     speechService.speak({
-      text: `Olá! Esta é a voz configurada para ler seus documentos PDF e responder suas dúvidas usando ${currentProvider.name}.`,
+      text: 'Atenção para esta dica de prova! Enquanto na esfera privada o particular pode fazer tudo que a lei não proíbe, na Administração Pública o gestor só age quando a lei autoriza.',
+      blockType: 'alert',
       settings: draftVoice,
+      geminiKeyFallback: draftConfig.apiKeys.gemini,
       openAiKeyFallback: draftConfig.apiKeys.openai,
     });
   };
@@ -133,20 +135,20 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-3 sm:p-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full shadow-2xl overflow-hidden flex flex-col max-h-[92dvh]">
         {/* Modal Header */}
-        <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
+        <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
-              <KeyRound className="w-5 h-5" />
+              <Volume2 className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-bold text-slate-100">
-                Configurar Inteligência Artificial & Voz
+                Voz Expressiva & Inteligência Artificial
               </h2>
               <p className="text-xs text-slate-400">
-                Conecte sua chave de API favorita • Salva 100% localmente no seu navegador
+                Personalize a voz neural do Professor e conecte sua API Key favorita
               </p>
             </div>
           </div>
@@ -160,41 +162,377 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
         </div>
 
         {/* Navigation Tabs */}
-        <div className="px-6 pt-3 border-b border-slate-800 flex gap-4 bg-slate-950/40">
-          <button
-            type="button"
-            onClick={() => setActiveTab('ai')}
-            className={`pb-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
-              activeTab === 'ai'
-                ? 'border-indigo-500 text-indigo-400'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>Provedor de IA (API Key)</span>
-          </button>
+        <div className="px-6 pt-3 border-b border-slate-800 flex gap-5 bg-slate-950/40">
           <button
             type="button"
             onClick={() => setActiveTab('voice')}
-            className={`pb-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
+            className={`pb-3 text-xs sm:text-sm font-bold border-b-2 transition-colors flex items-center gap-2 ${
               activeTab === 'voice'
                 ? 'border-indigo-500 text-indigo-400'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             <Volume2 className="w-4 h-4" />
-            <span>Voz e Leitura Assistida</span>
+            <span>1. Motor de Voz com Emoção</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('ai')}
+            className={`pb-3 text-xs sm:text-sm font-bold border-b-2 transition-colors flex items-center gap-2 ${
+              activeTab === 'ai'
+                ? 'border-indigo-500 text-indigo-400'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <KeyRound className="w-4 h-4" />
+            <span>2. Chave de API (Gemini, OpenAI, Claude...)</span>
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="p-6 overflow-y-auto space-y-6 flex-1">
-          {activeTab === 'ai' ? (
-            <>
-              {/* Provider Selector Grid */}
+        <div className="p-5 sm:p-6 overflow-y-auto space-y-5 flex-1">
+          {activeTab === 'voice' ? (
+            <div className="space-y-5">
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-4">
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-indigo-400 mb-2.5">
+                    Escolha o Motor de Voz (Text-to-Speech)
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'gemini_tts' }))
+                      }
+                      className={`p-3 rounded-xl border text-left transition-all ${
+                        draftVoice.ttsEngine === 'gemini_tts'
+                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                          : 'bg-slate-900 border-slate-800 text-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold">
+                          Gemini Neural Audio (Ultra Expressiva)
+                        </span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold">
+                          Recomendado
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Usa sua própria chave do Google Gemini para gerar voz humana com entonação real de professor!
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'openai_cloud' }))
+                      }
+                      className={`p-3 rounded-xl border text-left transition-all ${
+                        draftVoice.ttsEngine === 'openai_cloud'
+                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                          : 'bg-slate-900 border-slate-800 text-slate-300'
+                      }`}
+                    >
+                      <div className="text-xs font-bold">
+                        OpenAI GPT-4o Mini TTS (Com Emoção)
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Voz neural da OpenAI guiada por instruções de ênfase para concursos.
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'elevenlabs' }))
+                      }
+                      className={`p-3 rounded-xl border text-left transition-all ${
+                        draftVoice.ttsEngine === 'elevenlabs'
+                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                          : 'bg-slate-900 border-slate-800 text-slate-300'
+                      }`}
+                    >
+                      <div className="text-xs font-bold">
+                        ElevenLabs Multilingual v2
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Narração de estúdio ultra-realista (requer chave ElevenLabs).
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'browser' }))
+                      }
+                      className={`p-3 rounded-xl border text-left transition-all ${
+                        draftVoice.ttsEngine === 'browser'
+                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                          : 'bg-slate-900 border-slate-800 text-slate-300'
+                      }`}
+                    >
+                      <div className="text-xs font-bold">
+                        Voz Neural do Navegador + Prosódia Ativa
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        100% offline/gratuita com modulação dinâmica de tom em alertas e títulos.
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Engine-Specific Voice Selection */}
+                {draftVoice.ttsEngine === 'gemini_tts' && (
+                  <div className="space-y-2 pt-1">
+                    <label className="block text-xs font-medium text-slate-300">
+                      Timbre da Voz Neural Gemini
+                    </label>
+                    <select
+                      value={draftVoice.geminiVoiceName || 'Kore'}
+                      onChange={(e) =>
+                        setDraftVoice((prev) => ({
+                          ...prev,
+                          geminiVoiceName: e.target.value as any,
+                        }))
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
+                    >
+                      <option value="Kore">Kore (Feminina calorosa, firme e muito didática)</option>
+                      <option value="Aoede">Aoede (Feminina expressiva e natural)</option>
+                      <option value="Puck">Puck (Masculina dinâmica e entusiasmada)</option>
+                      <option value="Charon">Charon (Masculina serena e articulada)</option>
+                      <option value="Fenrir">Fenrir (Masculina grave com presença de aula)</option>
+                    </select>
+                    {!draftConfig.apiKeys.gemini && (
+                      <p className="text-[11px] text-amber-300">
+                        💡 Dica: Insira sua chave gratuita do Google Gemini na aba "2. Chave de API" para ativar esta voz neural!
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {draftVoice.ttsEngine === 'openai_cloud' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        Voz OpenAI
+                      </label>
+                      <select
+                        value={draftVoice.cloudVoiceId}
+                        onChange={(e) =>
+                          setDraftVoice((prev) => ({
+                            ...prev,
+                            cloudVoiceId: e.target.value as any,
+                          }))
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
+                      >
+                        <option value="nova">Nova (Feminina enérgica e clara)</option>
+                        <option value="shimmer">Shimmer (Feminina expressiva)</option>
+                        <option value="onyx">Onyx (Masculina grave de professor)</option>
+                        <option value="alloy">Alloy (Equilibrada)</option>
+                        <option value="echo">Echo (Didática e pausada)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        API Key OpenAI (para Áudio)
+                      </label>
+                      <input
+                        type="password"
+                        value={draftVoice.openAiTtsApiKey || draftConfig.apiKeys.openai || ''}
+                        onChange={(e) =>
+                          setDraftVoice((prev) => ({
+                            ...prev,
+                            openAiTtsApiKey: e.target.value,
+                          }))
+                        }
+                        placeholder="sk-proj-..."
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {draftVoice.ttsEngine === 'elevenlabs' && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        API Key ElevenLabs
+                      </label>
+                      <input
+                        type="password"
+                        value={draftVoice.elevenLabsApiKey || ''}
+                        onChange={(e) =>
+                          setDraftVoice((prev) => ({
+                            ...prev,
+                            elevenLabsApiKey: e.target.value,
+                          }))
+                        }
+                        placeholder="xi-api-key..."
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1">
+                        Voice ID (ElevenLabs)
+                      </label>
+                      <input
+                        type="text"
+                        value={draftVoice.elevenLabsVoiceId || 'EXAVITQu4vr4xnSDxMaL'}
+                        onChange={(e) =>
+                          setDraftVoice((prev) => ({
+                            ...prev,
+                            elevenLabsVoiceId: e.target.value,
+                          }))
+                        }
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {draftVoice.ttsEngine === 'browser' && (
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Voz Neural do Dispositivo (Vozes "Natural / Neural" ranqueadas no topo)
+                    </label>
+                    <select
+                      value={draftVoice.browserVoiceURI}
+                      onChange={(e) =>
+                        setDraftVoice((prev) => ({
+                          ...prev,
+                          browserVoiceURI: e.target.value,
+                        }))
+                      }
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
+                    >
+                      {availableVoices.length === 0 && (
+                        <option value="">Voz padrão do sistema (pt-BR)</option>
+                      )}
+                      {availableVoices.map((v) => (
+                        <option key={v.voiceURI} value={v.voiceURI}>
+                          {v.name} ({v.lang})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Speed & Test Sample */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                  <div>
+                    <div className="flex justify-between text-xs mb-1">
+                      <span className="text-slate-300 font-medium">Velocidade da Aula</span>
+                      <span className="text-indigo-400 font-bold">
+                        {draftVoice.rate.toFixed(2)}x
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.75"
+                      max="1.8"
+                      step="0.05"
+                      value={draftVoice.rate}
+                      onChange={(e) =>
+                        setDraftVoice((prev) => ({
+                          ...prev,
+                          rate: parseFloat(e.target.value),
+                        }))
+                      }
+                      className="w-full accent-indigo-500"
+                    />
+                  </div>
+
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      onClick={handleTestVoiceSample}
+                      className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-200 border border-indigo-500/40 text-xs font-bold transition-colors"
+                    >
+                      <Play className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Testar Entonação da Voz</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Study Method Checkboxes */}
+              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draftVoice.autoFlashcardsOnTopicEnd}
+                    onChange={(e) =>
+                      setDraftVoice((prev) => ({
+                        ...prev,
+                        autoFlashcardsOnTopicEnd: e.target.checked,
+                      }))
+                    }
+                    className="mt-1 rounded accent-indigo-500"
+                  />
+                  <div>
+                    <span className="block text-xs font-semibold text-slate-200">
+                      Pausa Automática para Flashcards ao Fim de Cada Tópico (Active Recall)
+                    </span>
+                    <span className="block text-[11px] text-slate-400">
+                      Ao concluir um tópico da apostila, pausa a leitura e lança 2 a 3 perguntas de fixação na aba lateral.
+                    </span>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draftVoice.sanitizeHeadersFooters}
+                    onChange={(e) =>
+                      setDraftVoice((prev) => ({
+                        ...prev,
+                        sanitizeHeadersFooters: e.target.checked,
+                      }))
+                    }
+                    className="mt-1 rounded accent-indigo-500"
+                  />
+                  <div>
+                    <span className="block text-xs font-semibold text-slate-200">
+                      Filtro Inteligente para PDFs do Estratégia & Gran Cursos
+                    </span>
+                    <span className="block text-[11px] text-slate-400">
+                      Ignora automaticamente cabeçalhos repetitivos, números de página, CPF e rodapés de copyright.
+                    </span>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={draftVoice.autoResumeAfterAnswer}
+                    onChange={(e) =>
+                      setDraftVoice((prev) => ({
+                        ...prev,
+                        autoResumeAfterAnswer: e.target.checked,
+                      }))
+                    }
+                    className="mt-1 rounded accent-indigo-500"
+                  />
+                  <div>
+                    <span className="block text-xs font-semibold text-slate-200">
+                      Retomar leitura do PDF após explicação do Professor
+                    </span>
+                    <span className="block text-[11px] text-slate-400">
+                      Assim que o Professor terminar de responder sua dúvida por voz, a leitura da apostila continua de onde parou.
+                    </span>
+                  </div>
+                </label>
+              </div>
+            </div>
+          ) : (
+            /* AI Provider Tab */
+            <div className="space-y-5">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2.5">
-                  1. Escolha o Provedor de IA
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                  Escolha o Cérebro da IA (Modo Professor & Flashcards)
                 </label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {PROVIDER_ORDER.map((id) => {
@@ -217,7 +555,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                           {hasKeyConfigured && (
                             <span
                               className="w-2 h-2 rounded-full bg-emerald-400"
-                              title="Chave preenchida"
+                              title="Chave configurada"
                             />
                           )}
                         </div>
@@ -230,15 +568,14 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                 </div>
               </div>
 
-              {/* API Key Input */}
               <div className="bg-slate-950/60 border border-slate-800/90 rounded-xl p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-sm font-semibold text-slate-100">
-                      Configurar {currentProvider.name}
+                      Chave de API — {currentProvider.name}
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Insira sua chave de API para habilitar comentários e respostas por voz
+                      Salva exclusivamente no navegador do seu dispositivo
                     </p>
                   </div>
                   <a
@@ -247,38 +584,32 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     rel="noreferrer"
                     className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 font-medium"
                   >
-                    <span>Obter API Key</span>
+                    <span>Gerar Chave</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                    Chave de API ({currentProvider.shortName})
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showKey ? 'text' : 'password'}
-                      value={currentApiKey}
-                      onChange={(e) => handleKeyChange(e.target.value)}
-                      placeholder={currentProvider.keyPlaceholder}
-                      className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 focus:outline-none rounded-xl px-3.5 py-2.5 pr-10 text-sm text-slate-100 font-mono"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowKey((prev) => !prev)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
-                    >
-                      {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
+                <div className="relative">
+                  <input
+                    type={showKey ? 'text' : 'password'}
+                    value={currentApiKey}
+                    onChange={(e) => handleKeyChange(e.target.value)}
+                    placeholder={currentProvider.keyPlaceholder}
+                    className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 focus:outline-none rounded-xl px-3.5 py-2.5 pr-10 text-sm text-slate-100 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowKey((prev) => !prev)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                  >
+                    {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
 
-                {/* Model Selector + Custom Model */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                      Modelo Recomendado
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Modelo Sugerido
                     </label>
                     <select
                       value={
@@ -291,46 +622,42 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                           handleModelChange(e.target.value);
                         }
                       }}
-                      className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 focus:outline-none rounded-xl px-3 py-2.5 text-xs text-slate-100"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100"
                     >
                       {currentProvider.models.map((m) => (
                         <option key={m.id} value={m.id}>
                           {m.label}
                         </option>
                       ))}
-                      <option value="__custom__">Outro modelo (digitar ao lado)...</option>
+                      <option value="__custom__">Outro modelo...</option>
                     </select>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                      ID do Modelo Ativo
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      ID do Modelo
                     </label>
                     <input
                       type="text"
                       value={currentModel}
                       onChange={(e) => handleModelChange(e.target.value)}
-                      placeholder={currentProvider.defaultModel}
-                      className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 focus:outline-none rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
                     />
                   </div>
                 </div>
 
-                {/* Base URL (Advanced/Custom) */}
                 <div>
                   <label className="block text-xs font-medium text-slate-400 mb-1">
-                    Endpoint Base da API (Opcional / Proxy Customizado)
+                    Endpoint Base (Opcional)
                   </label>
                   <input
                     type="text"
                     value={currentBaseUrl}
                     onChange={(e) => handleBaseUrlChange(e.target.value)}
-                    placeholder={currentProvider.defaultBaseUrl}
-                    className="w-full bg-slate-900/70 border border-slate-800 focus:border-indigo-500 focus:outline-none rounded-xl px-3 py-2 text-xs text-slate-300 font-mono"
+                    className="w-full bg-slate-900/70 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-300 font-mono"
                   />
                 </div>
 
-                {/* Test Connection Button & Status */}
                 <div className="pt-1 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                   <button
                     type="button"
@@ -341,12 +668,12 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     {testState.loading ? (
                       <>
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        <span>Testando conexão com {currentProvider.shortName}...</span>
+                        <span>Testando...</span>
                       </>
                     ) : (
                       <>
                         <Sparkles className="w-3.5 h-3.5" />
-                        <span>Testar Chave de API</span>
+                        <span>Testar Conexão</span>
                       </>
                     )}
                   </button>
@@ -368,204 +695,6 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     </div>
                   )}
                 </div>
-              </div>
-            </>
-          ) : (
-            /* Voice & Reading Settings Tab */
-            <div className="space-y-5">
-              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                    Motor de Voz (Text-to-Speech)
-                  </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'browser' }))
-                      }
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        draftVoice.ttsEngine === 'browser'
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
-                          : 'bg-slate-900 border-slate-800 text-slate-300'
-                      }`}
-                    >
-                      <div className="text-xs font-bold">
-                        Voz Nativa do Navegador (Recomendado)
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        100% gratuita, latência zero e compatível com qualquer IA (DeepSeek, Claude, Gemini, Kimi, GLM).
-                      </p>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({ ...prev, ttsEngine: 'openai_cloud' }))
-                      }
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        draftVoice.ttsEngine === 'openai_cloud'
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white'
-                          : 'bg-slate-900 border-slate-800 text-slate-300'
-                      }`}
-                    >
-                      <div className="text-xs font-bold">OpenAI Cloud TTS (Voz Neural HD)</div>
-                      <p className="text-[11px] text-slate-400 mt-1">
-                        Usa a API de áudio da OpenAI (requer chave da OpenAI preenchida).
-                      </p>
-                    </button>
-                  </div>
-                </div>
-
-                {draftVoice.ttsEngine === 'browser' ? (
-                  <div>
-                    <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                      Voz do Sistema (Português destacado no topo)
-                    </label>
-                    <select
-                      value={draftVoice.browserVoiceURI}
-                      onChange={(e) =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          browserVoiceURI: e.target.value,
-                        }))
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                    >
-                      {availableVoices.length === 0 && (
-                        <option value="">Voz padrão do navegador (pt-BR)</option>
-                      )}
-                      {availableVoices.map((v) => (
-                        <option key={v.voiceURI} value={v.voiceURI}>
-                          {v.name} ({v.lang})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                        Voz OpenAI TTS
-                      </label>
-                      <select
-                        value={draftVoice.cloudVoiceId}
-                        onChange={(e) =>
-                          setDraftVoice((prev) => ({
-                            ...prev,
-                            cloudVoiceId: e.target.value as any,
-                          }))
-                        }
-                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                      >
-                        <option value="nova">Nova (Feminina natural e clara)</option>
-                        <option value="alloy">Alloy (Versátil e equilibrada)</option>
-                        <option value="onyx">Onyx (Masculina grave e firme)</option>
-                        <option value="shimmer">Shimmer (Expressiva e suave)</option>
-                        <option value="echo">Echo (Calma e didática)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                        Chave OpenAI para Áudio (se usar outro LLM)
-                      </label>
-                      <input
-                        type="password"
-                        value={draftVoice.openAiTtsApiKey || draftConfig.apiKeys.openai || ''}
-                        onChange={(e) =>
-                          setDraftVoice((prev) => ({
-                            ...prev,
-                            openAiTtsApiKey: e.target.value,
-                          }))
-                        }
-                        placeholder="sk-proj-..."
-                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* Speed & Pitch sliders */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-                  <div>
-                    <div className="flex justify-between text-xs mb-1">
-                      <span className="text-slate-300 font-medium">Velocidade da Leitura</span>
-                      <span className="text-indigo-400 font-bold">{draftVoice.rate.toFixed(2)}x</span>
-                    </div>
-                    <input
-                      type="range"
-                      min="0.75"
-                      max="1.8"
-                      step="0.05"
-                      value={draftVoice.rate}
-                      onChange={(e) =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          rate: parseFloat(e.target.value),
-                        }))
-                      }
-                      className="w-full accent-indigo-500"
-                    />
-                  </div>
-
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      onClick={handleTestVoiceSample}
-                      className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition-colors"
-                    >
-                      <Play className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Ouvir Amostra de Voz</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* Behavior Checkboxes */}
-              <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
-                <label className="flex items-start gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={draftVoice.autoResumeAfterAnswer}
-                    onChange={(e) =>
-                      setDraftVoice((prev) => ({
-                        ...prev,
-                        autoResumeAfterAnswer: e.target.checked,
-                      }))
-                    }
-                    className="mt-1 rounded accent-indigo-500"
-                  />
-                  <div>
-                    <span className="block text-xs font-semibold text-slate-200">
-                      Retomar leitura do PDF automaticamente após resposta da IA
-                    </span>
-                    <span className="block text-[11px] text-slate-400">
-                      Assim que a IA terminar de responder sua pergunta em voz alta, ela volta a ler o PDF da frase onde parou.
-                    </span>
-                  </div>
-                </label>
-
-                <label className="flex items-start gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={draftVoice.proactivePageSummary}
-                    onChange={(e) =>
-                      setDraftVoice((prev) => ({
-                        ...prev,
-                        proactivePageSummary: e.target.checked,
-                      }))
-                    }
-                    className="mt-1 rounded accent-indigo-500"
-                  />
-                  <div>
-                    <span className="block text-xs font-semibold text-slate-200">
-                      Modo Tutor Proativo ao final de cada página
-                    </span>
-                    <span className="block text-[11px] text-slate-400">
-                      Ao concluir a leitura de uma página, a IA faz um breve comentário resumindo os pontos-chave antes de avançar.
-                    </span>
-                  </div>
-                </label>
               </div>
             </div>
           )}
