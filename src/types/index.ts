@@ -1,11 +1,11 @@
-export type LLMProviderId =
-  | 'gemini'
-  | 'openai'
-  | 'claude'
-  | 'deepseek'
-  | 'kimi'
-  | 'glm'
-  | 'custom';
+export type LLMProviderId = 'gemini';
+
+export interface GeminiModelOption {
+  id: string;
+  label: string;
+  description?: string;
+  freeTierBadge?: string;
+}
 
 export interface ProviderMetadata {
   id: LLMProviderId;
@@ -14,7 +14,7 @@ export interface ProviderMetadata {
   badgeColor: string;
   defaultBaseUrl: string;
   defaultModel: string;
-  models: { id: string; label: string; description?: string }[];
+  models: GeminiModelOption[];
   keyPlaceholder: string;
   docsUrl: string;
   supportsCloudTts?: boolean;
@@ -25,6 +25,7 @@ export interface ProviderConfig {
   apiKeys: Record<LLMProviderId, string>;
   selectedModels: Record<LLMProviderId, string>;
   customBaseUrls: Partial<Record<LLMProviderId, string>>;
+  aiSanitizePdf?: boolean;
 }
 
 export type TtsEngineMode =
@@ -151,6 +152,8 @@ export interface PDFDocumentData {
   sentences: PDFSentence[];
   topics: PDFTopic[];
   currentSentenceIndex: number;
+  removedNoiseCount?: number;
+  aiCleaned?: boolean;
   pdfBytes?: ArrayBuffer;
 }
 
@@ -206,4 +209,33 @@ export interface StudyStats {
   sentencesReadCount: number;
   flashcardsReviewedCount: number;
   topicsCompletedCount: number;
+}
+
+export interface UserAccount {
+  username: string;
+  passwordHash: string;
+  createdAt: number;
+  lastLoginAt: number;
+  geminiApiKey: string;
+  geminiModel: string;
+  aiSanitizePdf: boolean;
+  voiceSettings: VoiceSettings;
+  studyStats: StudyStats;
+  activeDocumentId?: string;
+}
+
+export interface PdfLibraryItemSummary {
+  id: string;
+  ownerUsername: string;
+  fileName: string;
+  fileSize: number;
+  totalPages: number;
+  uploadedAt: number;
+  lastReadAt: number;
+  currentSentenceIndex: number;
+  totalSentences: number;
+  currentPage: number;
+  progressPercent: number;
+  removedNoiseCount: number;
+  aiCleaned: boolean;
 }

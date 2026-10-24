@@ -1,122 +1,81 @@
 import { buildProviderRequest, extractProviderText } from '../server/llmProxy';
+import { finalizeTopicsAndSentences } from './pdfService';
 import type {
   ConversationMessage,
   FlashcardItem,
+  GeminiModelOption,
   LLMProviderId,
   PDFDocumentData,
+  PDFSentence,
   PDFTopic,
   ProviderConfig,
   ProviderMetadata,
   SchematicSummary,
 } from '../types';
 
+export const GEMINI_FREE_TIER_FALLBACK_CHAIN: string[] = [
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+];
+
 export const PROVIDERS_CATALOG: Record<LLMProviderId, ProviderMetadata> = {
   gemini: {
     id: 'gemini',
-    name: 'Google Gemini',
+    name: 'Google AI Studio (Gemini)',
     shortName: 'Gemini',
     badgeColor: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
     defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    defaultModel: 'gemini-2.5-flash',
+    defaultModel: 'gemini-3.5-flash-lite',
     models: [
-      { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (Recomendado - Rápido)', description: 'Ideal para Modo Professor e Voz Neural Gemini' },
-      { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', description: 'Raciocínio profundo para textos jurídicos e bancas' },
-      { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', description: 'Baixa latência e alta fluidez' },
+      {
+        id: 'gemini-3.5-flash-lite',
+        label: 'Gemini 3.5 Flash-Lite (Recomendado — API Grátis)',
+        description:
+          'Maior cota diária gratuita no Google AI Studio. Ultrarrápido para limpeza de PDFs, Flashcards e Modo Professor.',
+        freeTierBadge: 'Grátis • Maior Cota',
+      },
+      {
+        id: 'gemini-3.1-flash-lite',
+        label: 'Gemini 3.1 Flash-Lite (API Grátis — Ultra Leve)',
+        description:
+          'Baixíssima latência para processamento de apostilas longas e leitura assistida.',
+        freeTierBadge: 'Grátis • Ultra Rápido',
+      },
+      {
+        id: 'gemini-2.5-flash-lite',
+        label: 'Gemini 2.5 Flash-Lite (API Grátis — Alta Estabilidade)',
+        description:
+          'Modelo leve de alta cota por minuto (RPM/RPD) no nível gratuito do AI Studio.',
+        freeTierBadge: 'Grátis • Estável',
+      },
+      {
+        id: 'gemini-2.5-flash',
+        label: 'Gemini 2.5 Flash (API Grátis — Equilibrado)',
+        description:
+          'Excelente didática para analogias de prova, Modo Professor e resumos esquemáticos.',
+        freeTierBadge: 'Grátis • Didático',
+      },
+      {
+        id: 'gemini-2.5-pro',
+        label: 'Gemini 2.5 Pro (Raciocínio Profundo)',
+        description:
+          'Raciocínio avançado para textos jurídicos densos e jurisprudência (cota gratuita mais restrita).',
+        freeTierBadge: 'Avançado',
+      },
+      {
+        id: 'gemini-2.0-flash',
+        label: 'Gemini 2.0 Flash (Clássico Rápido)',
+        description:
+          'Alta compatibilidade e velocidade constante na API v1beta.',
+        freeTierBadge: 'Grátis • Legado',
+      },
     ],
     keyPlaceholder: 'AIzaSy...',
     docsUrl: 'https://aistudio.google.com/app/apikey',
     supportsCloudTts: true,
-  },
-  openai: {
-    id: 'openai',
-    name: 'OpenAI (ChatGPT)',
-    shortName: 'ChatGPT',
-    badgeColor: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
-    defaultBaseUrl: 'https://api.openai.com/v1',
-    defaultModel: 'gpt-4o-mini',
-    models: [
-      { id: 'gpt-4o-mini', label: 'GPT-4o Mini (Rápido)', description: 'Respostas ágeis para leitura assistida' },
-      { id: 'gpt-4o', label: 'GPT-4o', description: 'Modelo multimodal de alta precisão' },
-      { id: 'o3-mini', label: 'o3-mini', description: 'Focado em lógica, exatas e direito' },
-    ],
-    keyPlaceholder: 'sk-proj-...',
-    docsUrl: 'https://platform.openai.com/api-keys',
-    supportsCloudTts: true,
-  },
-  claude: {
-    id: 'claude',
-    name: 'Anthropic Claude',
-    shortName: 'Claude',
-    badgeColor: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-    defaultBaseUrl: 'https://api.anthropic.com/v1',
-    defaultModel: 'claude-3-7-sonnet-latest',
-    models: [
-      { id: 'claude-3-7-sonnet-latest', label: 'Claude 3.7 Sonnet', description: 'Didática excepcional e resumos esquemáticos' },
-      { id: 'claude-3-5-sonnet-latest', label: 'Claude 3.5 Sonnet', description: 'Equilíbrio entre inteligência e velocidade' },
-      { id: 'claude-3-5-haiku-latest', label: 'Claude 3.5 Haiku (Rápido)', description: 'Respostas ultra-rápidas' },
-    ],
-    keyPlaceholder: 'sk-ant-api03-...',
-    docsUrl: 'https://console.anthropic.com/settings/keys',
-  },
-  deepseek: {
-    id: 'deepseek',
-    name: 'DeepSeek',
-    shortName: 'DeepSeek',
-    badgeColor: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
-    defaultBaseUrl: 'https://api.deepseek.com/v1',
-    defaultModel: 'deepseek-chat',
-    models: [
-      { id: 'deepseek-chat', label: 'DeepSeek V3 (deepseek-chat)', description: 'Rápido, preciso e excelente custo-benefício' },
-      { id: 'deepseek-reasoner', label: 'DeepSeek R1 (deepseek-reasoner)', description: 'Raciocínio avançado passo a passo' },
-    ],
-    keyPlaceholder: 'sk-...',
-    docsUrl: 'https://platform.deepseek.com/api_keys',
-  },
-  kimi: {
-    id: 'kimi',
-    name: 'Kimi (Moonshot AI)',
-    shortName: 'Kimi',
-    badgeColor: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
-    defaultBaseUrl: 'https://api.moonshot.cn/v1',
-    defaultModel: 'moonshot-v1-32k',
-    models: [
-      { id: 'moonshot-v1-32k', label: 'Moonshot v1 32K', description: 'Ótimo para apostilas longas do Estratégia/Gran' },
-      { id: 'moonshot-v1-8k', label: 'Moonshot v1 8K (Rápido)', description: 'Baixa latência para conversação' },
-      { id: 'kimi-latest', label: 'Kimi Latest', description: 'Versão mais recente do Kimi' },
-    ],
-    keyPlaceholder: 'sk-...',
-    docsUrl: 'https://platform.moonshot.cn/console/api-keys',
-  },
-  glm: {
-    id: 'glm',
-    name: 'GLM (Zhipu AI)',
-    shortName: 'GLM',
-    badgeColor: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
-    defaultBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    defaultModel: 'glm-4-flash',
-    models: [
-      { id: 'glm-4-flash', label: 'GLM-4 Flash (Ultra Rápido)', description: 'Alta velocidade para leitura interativa' },
-      { id: 'glm-4-plus', label: 'GLM-4 Plus', description: 'Modelo avançado de alta capacidade' },
-      { id: 'glm-4-air', label: 'GLM-4 Air', description: 'Leve e responsivo' },
-    ],
-    keyPlaceholder: 'id.secret...',
-    docsUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
-  },
-  custom: {
-    id: 'custom',
-    name: 'OpenRouter / Custom API',
-    shortName: 'OpenRouter',
-    badgeColor: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
-    defaultBaseUrl: 'https://openrouter.ai/api/v1',
-    defaultModel: 'google/gemini-2.5-flash',
-    models: [
-      { id: 'google/gemini-2.5-flash', label: 'Google: Gemini 2.5 Flash (via OpenRouter)' },
-      { id: 'anthropic/claude-3.7-sonnet', label: 'Anthropic: Claude 3.7 Sonnet (via OpenRouter)' },
-      { id: 'deepseek/deepseek-chat', label: 'DeepSeek V3 (via OpenRouter)' },
-      { id: 'meta-llama/llama-3.3-70b-instruct', label: 'Meta: Llama 3.3 70B Instruct' },
-    ],
-    keyPlaceholder: 'sk-or-v1-...',
-    docsUrl: 'https://openrouter.ai/keys',
   },
 };
 
@@ -125,24 +84,83 @@ export function createDefaultProviderConfig(): ProviderConfig {
     providerId: 'gemini',
     apiKeys: {
       gemini: '',
-      openai: '',
-      claude: '',
-      deepseek: '',
-      kimi: '',
-      glm: '',
-      custom: '',
     },
     selectedModels: {
       gemini: PROVIDERS_CATALOG.gemini.defaultModel,
-      openai: PROVIDERS_CATALOG.openai.defaultModel,
-      claude: PROVIDERS_CATALOG.claude.defaultModel,
-      deepseek: PROVIDERS_CATALOG.deepseek.defaultModel,
-      kimi: PROVIDERS_CATALOG.kimi.defaultModel,
-      glm: PROVIDERS_CATALOG.glm.defaultModel,
-      custom: PROVIDERS_CATALOG.custom.defaultModel,
     },
     customBaseUrls: {},
+    aiSanitizePdf: true,
   };
+}
+
+/**
+ * Queries Google AI Studio (`GET /v1beta/models`) to list all Gemini models enabled for the user's API key.
+ */
+export async function fetchAvailableGeminiModels(
+  apiKey: string
+): Promise<GeminiModelOption[]> {
+  const cleanKey = apiKey.trim();
+  if (!cleanKey) {
+    throw new Error('Informe sua chave de API do Google AI Studio primeiro.');
+  }
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
+      cleanKey
+    )}`
+  );
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Erro ao consultar modelos no AI Studio (${res.status}): ${errText}`);
+  }
+
+  const data = await res.json();
+  const rawModels: any[] = Array.isArray(data?.models) ? data.models : [];
+
+  const supported = rawModels
+    .filter(
+      (m) =>
+        typeof m.name === 'string' &&
+        m.name.includes('gemini') &&
+        Array.isArray(m.supportedGenerationMethods) &&
+        m.supportedGenerationMethods.includes('generateContent')
+    )
+    .map((m) => {
+      const id = String(m.name).replace(/^models\//, '');
+      const isLite = id.includes('flash-lite');
+      const isFlash = id.includes('flash');
+      return {
+        id,
+        label: `${m.displayName || id} (${id})`,
+        description:
+          m.description ||
+          (isLite
+            ? 'Modelo Flash-Lite otimizado para alta cota gratuita'
+            : 'Modelo disponível na sua chave do Google AI Studio'),
+        freeTierBadge: isLite
+          ? 'Grátis • Lite'
+          : isFlash
+            ? 'Grátis • Flash'
+            : 'AI Studio',
+      } as GeminiModelOption;
+    });
+
+  // Sort Flash-Lite and 3.x / 2.5 models first
+  supported.sort((a, b) => {
+    const score = (id: string) => {
+      if (id === 'gemini-3.5-flash-lite') return 100;
+      if (id.includes('3.5') && id.includes('flash-lite')) return 95;
+      if (id.includes('3.1') && id.includes('flash-lite')) return 90;
+      if (id.includes('2.5') && id.includes('flash-lite')) return 85;
+      if (id.includes('flash-lite')) return 80;
+      if (id.includes('2.5-flash')) return 75;
+      if (id.includes('flash')) return 60;
+      return 40;
+    };
+    return score(b.id) - score(a.id);
+  });
+
+  return supported.length > 0 ? supported : PROVIDERS_CATALOG.gemini.models;
 }
 
 export function buildReadingSystemPrompt(
@@ -190,73 +208,25 @@ DIRETRIZES DO MODO PROFESSOR (MUITO IMPORTANTE):
 4. Seja direto (cerca de 3 a 5 frases) e SEMPRE finalize perguntando de forma acolhedora: "Ficou claro? Podemos continuar a leitura?"`;
 }
 
-export async function callLlmAssistant(params: {
-  config: ProviderConfig;
+async function executeGeminiRequestWithModel(params: {
+  apiKey: string;
+  model: string;
+  baseUrl: string;
   systemPrompt: string;
-  history: ConversationMessage[];
-  userQuestion: string;
+  messages: { role: 'user' | 'assistant'; content: string }[];
+  temperature?: number;
 }): Promise<string> {
-  const { config, systemPrompt, history, userQuestion } = params;
-  const provider = config.providerId;
-  const apiKey = config.apiKeys[provider]?.trim();
-  const model =
-    config.selectedModels[provider]?.trim() ||
-    PROVIDERS_CATALOG[provider].defaultModel;
-  const baseUrl =
-    config.customBaseUrls[provider]?.trim() ||
-    PROVIDERS_CATALOG[provider].defaultBaseUrl;
-
-  if (!apiKey) {
-    throw new Error(
-      `Nenhuma chave de API configurada para ${PROVIDERS_CATALOG[provider].name}. Clique em "API Key" no topo para conectar.`
-    );
-  }
-
-  const recentMessages = history.slice(-6).map((msg) => ({
-    role: msg.role,
-    content: msg.content,
-  }));
-
   const payload = {
-    provider,
-    apiKey,
-    model,
-    baseUrl,
-    systemPrompt,
-    messages: [...recentMessages, { role: 'user' as const, content: userQuestion }],
-    temperature: 0.4,
+    provider: 'gemini' as const,
+    apiKey: params.apiKey,
+    model: params.model,
+    baseUrl: params.baseUrl,
+    systemPrompt: params.systemPrompt,
+    messages: params.messages,
+    temperature: params.temperature ?? 0.35,
   };
 
-  try {
-    const res = await fetch('/api/llm/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      return data.reply;
-    }
-
-    const contentType = res.headers.get('content-type') || '';
-    if (contentType.includes('application/json')) {
-      const errJson = await res.json();
-      throw new Error(
-        errJson.error || `Erro (${res.status}) ao consultar ${PROVIDERS_CATALOG[provider].name}`
-      );
-    }
-  } catch (proxyErr: any) {
-    if (
-      proxyErr?.message &&
-      !proxyErr.message.includes('fetch') &&
-      !proxyErr.message.includes('Failed')
-    ) {
-      throw proxyErr;
-    }
-  }
-
-  // Fallback direct browser call (e.g. on GitHub Pages)
+  // Direct call to Google AI Studio API (works identically on GitHub Pages and localhost)
   const directReq = buildProviderRequest(payload);
   const directRes = await fetch(directReq.url, {
     method: 'POST',
@@ -266,15 +236,192 @@ export async function callLlmAssistant(params: {
 
   if (!directRes.ok) {
     const text = await directRes.text();
-    throw new Error(`Falha na chamada à API (${directRes.status}): ${text}`);
+    const err: any = new Error(
+      `Erro Gemini (${directRes.status}) no modelo ${params.model}: ${text}`
+    );
+    err.status = directRes.status;
+    throw err;
   }
 
   const directData = await directRes.json();
-  return extractProviderText(provider, directData);
+  return extractProviderText('gemini', directData);
+}
+
+export async function callLlmAssistant(params: {
+  config: ProviderConfig;
+  systemPrompt: string;
+  history: ConversationMessage[];
+  userQuestion: string;
+}): Promise<string> {
+  const { config, systemPrompt, history, userQuestion } = params;
+  const apiKey = config.apiKeys.gemini?.trim();
+  const preferredModel =
+    config.selectedModels.gemini?.trim() || PROVIDERS_CATALOG.gemini.defaultModel;
+  const baseUrl =
+    config.customBaseUrls.gemini?.trim() || PROVIDERS_CATALOG.gemini.defaultBaseUrl;
+
+  if (!apiKey) {
+    throw new Error(
+      'Nenhuma chave do Google AI Studio configurada. Clique em "Voz & IA" ou "Conta" no topo para salvar sua API Key gratuita do Gemini.'
+    );
+  }
+
+  const recentMessages = history.slice(-6).map((msg) => ({
+    role: msg.role,
+    content: msg.content,
+  }));
+  const messages = [
+    ...recentMessages,
+    { role: 'user' as const, content: userQuestion },
+  ];
+
+  // Try preferred model first; if 404 (model alias not enabled in region) or 429 (free tier rate limit on that model),
+  // automatically fall back through GEMINI_FREE_TIER_FALLBACK_CHAIN!
+  const candidateModels = [
+    preferredModel,
+    ...GEMINI_FREE_TIER_FALLBACK_CHAIN.filter((m) => m !== preferredModel),
+  ];
+
+  let lastError: any = null;
+  for (const modelToTry of candidateModels) {
+    try {
+      return await executeGeminiRequestWithModel({
+        apiKey,
+        model: modelToTry,
+        baseUrl,
+        systemPrompt,
+        messages,
+      });
+    } catch (err: any) {
+      lastError = err;
+      const status = err?.status;
+      if (status === 404 || status === 429 || status === 503) {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError || new Error('Falha ao comunicar com o Google AI Studio (Gemini).');
 }
 
 /**
- * Generates Active Recall Flashcards at the end of a topic (via LLM or intelligent local fallback)
+ * Layer 3 AI PDF Sanitizer: Uses Gemini Flash-Lite to remove any remaining non-content noise
+ * (headers, footers, watermarks, editorial credits, broken TOC lines, page numbers)
+ * so the reader only speaks essential didactic text while preserving exact BBox coordinates.
+ */
+export async function sanitizeDocumentWithGemini(params: {
+  doc: PDFDocumentData;
+  config: ProviderConfig;
+}): Promise<{ cleanedDoc: PDFDocumentData; removedByAiCount: number }> {
+  const { doc, config } = params;
+  const apiKey = config.apiKeys.gemini?.trim();
+  if (!apiKey || doc.sentences.length === 0) {
+    return { cleanedDoc: doc, removedByAiCount: 0 };
+  }
+
+  const BATCH_SIZE = 45;
+  const sentencesToDrop = new Set<number>();
+  const cleanedTextOverrides = new Map<number, string>();
+
+  // Process up to the first 180 sentences synchronously during upload so it stays fast (< 2.5s)
+  const maxSentencesToInspect = Math.min(doc.sentences.length, 180);
+
+  for (let start = 0; start < maxSentencesToInspect; start += BATCH_SIZE) {
+    const slice = doc.sentences.slice(start, start + BATCH_SIZE);
+    const numberedPayload = slice.map((s) => ({
+      i: s.globalIndex,
+      p: s.pageNumber,
+      t: s.text,
+    }));
+
+    try {
+      const rawReply = await callLlmAssistant({
+        config,
+        systemPrompt: `Você é um filtro de limpeza de PDFs de estudo (Estratégia, Gran Cursos, livros e artigos).
+Sua tarefa é identificar frases que SÃO LIXO/RUÍDO DE LAYOUT e que NÃO devem ser lidas em voz alta, tais como:
+- Cabeçalhos ou rodapés de página (nome do curso, nome do professor solto no topo, número de página, data, URL, e-mail)
+- Marcas d'água de aluno (CPF, nome + e-mail, "Licenciado para", "Todos os direitos reservados", "Proibida a reprodução")
+- Linhas de sumário com pontilhados ou números de página soltos
+- Metadados editoriais, ISBN, expediente ou créditos de capa irrelevantes ao conteúdo didático.
+
+IMPORTANTE: Mantenha 100% dos títulos de capítulos/tópicos reais, artigos de lei, explicações teóricas, alertas de prova e questões!
+Retorne APENAS um JSON válido no formato:
+{"dropIndices": [lista de números "i" que são ruído e devem ser removidos]}`,
+        history: [],
+        userQuestion: JSON.stringify(numberedPayload),
+      });
+
+      const match = rawReply.match(/\{[\s\S]*\}/);
+      if (match) {
+        const parsed = JSON.parse(match[0]) as {
+          dropIndices?: number[];
+          cleanedTexts?: Record<string, string>;
+        };
+        if (Array.isArray(parsed.dropIndices)) {
+          for (const idx of parsed.dropIndices) {
+            if (typeof idx === 'number') {
+              sentencesToDrop.add(idx);
+            }
+          }
+        }
+        if (parsed.cleanedTexts && typeof parsed.cleanedTexts === 'object') {
+          for (const [k, v] of Object.entries(parsed.cleanedTexts)) {
+            const numIdx = Number(k);
+            if (!Number.isNaN(numIdx) && typeof v === 'string' && v.trim().length > 5) {
+              cleanedTextOverrides.set(numIdx, v.trim());
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Aviso na limpeza complementar Gemini IA:', err);
+      break;
+    }
+  }
+
+  // Never drop all sentences if the document is tiny
+  if (
+    sentencesToDrop.size === 0 &&
+    cleanedTextOverrides.size === 0
+  ) {
+    return {
+      cleanedDoc: { ...doc, aiCleaned: true },
+      removedByAiCount: 0,
+    };
+  }
+
+  const keptSentences: PDFSentence[] = [];
+  for (const s of doc.sentences) {
+    if (sentencesToDrop.has(s.globalIndex) && doc.sentences.length - sentencesToDrop.size >= 1) {
+      continue;
+    }
+    const overrideText = cleanedTextOverrides.get(s.globalIndex);
+    keptSentences.push({
+      ...s,
+      text: overrideText || s.text,
+      globalIndex: keptSentences.length,
+      isTopicEnd: false,
+    });
+  }
+
+  const updatedTopics = finalizeTopicsAndSentences(keptSentences);
+  const removedByAiCount = doc.sentences.length - keptSentences.length;
+
+  return {
+    cleanedDoc: {
+      ...doc,
+      sentences: keptSentences,
+      topics: updatedTopics,
+      removedNoiseCount: (doc.removedNoiseCount || 0) + removedByAiCount,
+      aiCleaned: true,
+    },
+    removedByAiCount,
+  };
+}
+
+/**
+ * Generates Active Recall Flashcards at the end of a topic (via Gemini or intelligent local fallback)
  */
 export async function generateTopicFlashcards(params: {
   doc: PDFDocumentData;
@@ -287,7 +434,7 @@ export async function generateTopicFlashcards(params: {
     topic.endSentenceIndex + 1
   );
   const topicText = topicSentences.map((s) => s.text).join(' ');
-  const hasApiKey = Boolean(config.apiKeys[config.providerId]?.trim());
+  const hasApiKey = Boolean(config.apiKeys.gemini?.trim());
 
   if (hasApiKey) {
     try {
@@ -351,7 +498,8 @@ export async function generateTopicFlashcards(params: {
       pageNumber: topic.pageNumber,
       question: `Qual é a principal pegadinha ou ponto de atenção destacado em "${topic.title}"?`,
       answer: alertSentence.text,
-      bancaTip: 'Atenção redobrada às ressalvas e jurisprudências do STF/STJ neste ponto!',
+      bancaTip:
+        'Atenção redobrada às ressalvas e jurisprudências do STF/STJ neste ponto!',
       revealed: false,
     });
   } else if (topicSentences.length > 2) {
@@ -363,7 +511,8 @@ export async function generateTopicFlashcards(params: {
       pageNumber: topic.pageNumber,
       question: `Como se aplica na prática de prova o desfecho do tópico "${topic.title}"?`,
       answer: lastSent.text,
-      bancaTip: 'Questões de múltipla escolha exigem a distinção literal deste requisito.',
+      bancaTip:
+        'Questões de múltipla escolha exigem a distinção literal deste requisito.',
       revealed: false,
     });
   }
@@ -383,7 +532,7 @@ export async function generateSchematicSummary(params: {
     .map((s) => s.text)
     .join(' ')
     .slice(0, 6000);
-  const hasApiKey = Boolean(config.apiKeys[config.providerId]?.trim());
+  const hasApiKey = Boolean(config.apiKeys.gemini?.trim());
 
   const alertsInDoc = doc.sentences
     .filter((s) => s.blockType === 'alert')
@@ -462,18 +611,18 @@ export async function testProviderConnection(
     const reply = await callLlmAssistant({
       config,
       systemPrompt:
-        'Responda em português com apenas uma frase curta confirmando que o Modo Professor está online.',
+        'Responda em português com apenas uma frase curta confirmando que o Modo Professor Gemini está online.',
       history: [],
-      userQuestion: 'Professor, você está conectado?',
+      userQuestion: 'Professor Gemini, você está conectado?',
     });
     return {
       ok: true,
-      message: reply || 'Conexão estabelecida com sucesso!',
+      message: reply || 'Conexão com Google AI Studio (Gemini) estabelecida com sucesso!',
     };
   } catch (err: any) {
     return {
       ok: false,
-      message: err?.message || 'Falha ao conectar com o provedor.',
+      message: err?.message || 'Falha ao conectar com o Google AI Studio.',
     };
   }
 }

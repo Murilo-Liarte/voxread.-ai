@@ -514,7 +514,7 @@ export const AssistantSidebar: React.FC<AssistantSidebarProps> = ({
             {!hasApiKey && (
               <div className="mx-3 mt-3 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 flex items-center justify-between gap-2">
                 <span>
-                  Conecte sua API Key ({activeProvider.shortName}, ChatGPT, Claude, DeepSeek, Kimi ou GLM) para o Modo Professor.
+                  Conecte sua API Key gratuita do Google AI Studio (Gemini) para o Modo Professor.
                 </span>
                 <button
                   type="button"

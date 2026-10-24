@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Header } from './components/Header';
 import { ApiKeyModal } from './components/ApiKeyModal';
+import { AccountModal } from './components/AccountModal';
+import { PdfLibraryModal } from './components/PdfLibraryModal';
 import { NeuroscienceModal } from './components/NeuroscienceModal';
 import { PdfOriginalViewer } from './components/PdfOriginalViewer';
 import { FocusedReaderView } from './components/FocusedReaderView';
@@ -14,22 +16,32 @@ import {
   generateSchematicSummary,
   generateTopicFlashcards,
   PROVIDERS_CATALOG,
+  sanitizeDocumentWithGemini,
 } from './services/llmService';
 import {
+  applyAccountToLocalSettings,
+  restoreActiveSession,
+  syncSettingsToActiveAccount,
+} from './services/authService';
+import {
+  deleteDocumentFromLibrary,
   loadActiveDocument,
   loadConversationHistory,
   loadFlashcards,
+  loadLibraryDocumentById,
   loadProviderConfig,
   loadSchematicSummary,
   loadStudyStats,
+  loadUserPdfLibrary,
   loadVoiceSettings,
-  saveActiveDocument,
   saveConversationHistory,
+  saveDocumentToUserLibrary,
   saveFlashcards,
   saveProviderConfig,
   saveSchematicSummary,
   saveStudyStats,
   saveVoiceSettings,
+  updateDocumentReadingProgress,
 } from './services/storageService';
 import type {
   ConversationMessage,
@@ -37,11 +49,13 @@ import type {
   FlashcardItem,
   PDFDocumentData,
   PDFSentence,
+  PdfLibraryItemSummary,
   ProviderConfig,
   ReaderState,
   SchematicSummary,
   SidebarTab,
   StudyStats,
+  UserAccount,
   ViewMode,
   VoiceModelDownloadProgress,
   VoiceSettings,
@@ -56,13 +70,16 @@ export const App: React.FC = () => {
   const [currentSentenceIndex, setCurrentSentenceIndex] = useState<number>(0);
   const [wordProgressRatio, setWordProgressRatio] = useState<number>(0);
   const [readerState, setReaderState] = useState<ReaderState>('idle');
-  // Central Area defaults to PDF Viewer with BBox Highlighter Overlay
   const [viewMode, setViewMode] = useState<ViewMode>('pdf');
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('flashcards');
   const [isAiPanelOpen, setIsAiPanelOpen] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth >= 1024 : false
   );
   const [isNeuroModalOpen, setIsNeuroModalOpen] = useState<boolean>(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState<boolean>(false);
+  const [isPdfLibraryOpen, setIsPdfLibraryOpen] = useState<boolean>(false);
+  const [activeAccount, setActiveAccount] = useState<UserAccount | null>(null);
+  const [pdfLibrary, setPdfLibrary] = useState<PdfLibraryItemSummary[]>([]);
   const [providerConfig, setProviderConfig] = useState<ProviderConfig>(() =>
     loadProviderConfig()
   );
@@ -79,8 +96,10 @@ export const App: React.FC = () => {
   const [isGeneratingSummary, setIsGeneratingSummary] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isLoadingPdf, setIsLoadingPdf] = useState<boolean>(false);
+  const [isAiCleaningPdf, setIsAiCleaningPdf] = useState<boolean>(false);
   const [interimTranscript, setInterimTranscript] = useState<string>('');
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [cleanNoticeBanner, setCleanNoticeBanner] = useState<string | null>(null);
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
   const [downloadProgress, setDownloadProgress] =
     useState<VoiceModelDownloadProgress | null>(null);
@@ -91,6 +110,7 @@ export const App: React.FC = () => {
   const sentenceIdxRef = useRef<number>(currentSentenceIndex);
   const voiceSettingsRef = useRef<VoiceSettings>(voiceSettings);
   const providerConfigRef = useRef<ProviderConfig>(providerConfig);
+  const activeAccountRef = useRef<UserAccount | null>(activeAccount);
   const messagesRef = useRef<ConversationMessage[]>(messages);
   const flashcardsRef = useRef<FlashcardItem[]>(flashcards);
 
@@ -109,6 +129,10 @@ export const App: React.FC = () => {
   useEffect(() => {
     providerConfigRef.current = providerConfig;
   }, [providerConfig]);
+
+  useEffect(() => {
+    activeAccountRef.current = activeAccount;
+  }, [activeAccount]);
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -148,34 +172,133 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [readerState]);
 
-  // Restore saved PDF, flashcards, summary and conversation from IndexedDB
+  // Restore persistent user account session, PDF library, and active document on startup
   useEffect(() => {
     let mounted = true;
-    loadActiveDocument().then(async (savedDoc) => {
-      if (!mounted || !savedDoc || !savedDoc.topics) return;
-      setDocumentData(savedDoc);
+
+    const initApp = async () => {
+      const restoredAcc = await restoreActiveSession();
+      if (!mounted) return;
+
+      let activeUsername: string | null = null;
+      if (restoredAcc) {
+        setActiveAccount(restoredAcc);
+        activeAccountRef.current = restoredAcc;
+        activeUsername = restoredAcc.username;
+        const applied = applyAccountToLocalSettings(restoredAcc);
+        setProviderConfig(applied.providerConfig);
+        setVoiceSettings(applied.voiceSettings);
+        setStudyStats(applied.studyStats);
+      }
+
+      const lib = await loadUserPdfLibrary(activeUsername);
+      if (mounted) {
+        setPdfLibrary(lib);
+      }
+
+      // Load most recently read document from user library or active document
+      let targetDoc: PDFDocumentData | null = null;
+      if (lib.length > 0) {
+        targetDoc = await loadLibraryDocumentById(lib[0].id, activeUsername);
+      }
+      if (!targetDoc) {
+        targetDoc = await loadActiveDocument();
+      }
+
+      if (!mounted || !targetDoc || !targetDoc.topics) return;
+
+      setDocumentData(targetDoc);
       const savedIdx = Math.min(
-        savedDoc.currentSentenceIndex || 0,
-        Math.max(0, savedDoc.sentences.length - 1)
+        targetDoc.currentSentenceIndex || 0,
+        Math.max(0, targetDoc.sentences.length - 1)
       );
       setCurrentSentenceIndex(savedIdx);
+
       const [hist, savedCards, savedSum] = await Promise.all([
-        loadConversationHistory(savedDoc.id),
-        loadFlashcards(savedDoc.id),
-        loadSchematicSummary(savedDoc.id),
+        loadConversationHistory(targetDoc.id),
+        loadFlashcards(targetDoc.id),
+        loadSchematicSummary(targetDoc.id),
       ]);
+
       if (mounted) {
         setMessages(hist);
         setFlashcards(savedCards);
         setSchematicSummary(savedSum);
       }
-    });
+    };
+
+    initApp();
 
     return () => {
       mounted = false;
       speechService.stopSpeaking();
       speechService.stopListening();
     };
+  }, []);
+
+  const handleLoadDocumentIntoWorkspace = useCallback(
+    async (doc: PDFDocumentData) => {
+      speechService.stopSpeaking();
+      speechService.stopListening();
+      setReaderState('idle');
+      setDocumentData(doc);
+      docRef.current = doc;
+
+      const savedIdx = Math.min(
+        doc.currentSentenceIndex || 0,
+        Math.max(0, doc.sentences.length - 1)
+      );
+      setCurrentSentenceIndex(savedIdx);
+      sentenceIdxRef.current = savedIdx;
+      setWordProgressRatio(0);
+
+      const [hist, savedCards, savedSum] = await Promise.all([
+        loadConversationHistory(doc.id),
+        loadFlashcards(doc.id),
+        loadSchematicSummary(doc.id),
+      ]);
+      setMessages(hist);
+      setFlashcards(savedCards);
+      setSchematicSummary(savedSum);
+    },
+    []
+  );
+
+  // Switch active account when user logs in or registers
+  const handleAccountSuccess = useCallback(
+    async (acc: UserAccount) => {
+      setActiveAccount(acc);
+      activeAccountRef.current = acc;
+      const applied = applyAccountToLocalSettings(acc);
+      setProviderConfig(applied.providerConfig);
+      setVoiceSettings(applied.voiceSettings);
+      setStudyStats(applied.studyStats);
+
+      const lib = await loadUserPdfLibrary(acc.username);
+      setPdfLibrary(lib);
+
+      if (lib.length > 0) {
+        const latestDoc = await loadLibraryDocumentById(lib[0].id, acc.username);
+        if (latestDoc) {
+          await handleLoadDocumentIntoWorkspace(latestDoc);
+        }
+      } else if (docRef.current.id !== 'demo-concursos-direito-adm') {
+        // Save currently open PDF to the newly created account's library!
+        const nextLib = await saveDocumentToUserLibrary(
+          docRef.current,
+          acc.username
+        );
+        setPdfLibrary(nextLib);
+      }
+    },
+    [handleLoadDocumentIntoWorkspace]
+  );
+
+  const handleAccountLogout = useCallback(async () => {
+    setActiveAccount(null);
+    activeAccountRef.current = null;
+    const guestLib = await loadUserPdfLibrary(null);
+    setPdfLibrary(guestLib);
   }, []);
 
   // Generate Flashcards for a specific topic and read the first question aloud
@@ -219,17 +342,19 @@ export const App: React.FC = () => {
             topicsCompletedCount: prev.topicsCompletedCount + 1,
           };
           saveStudyStats(updated);
+          syncSettingsToActiveAccount({
+            username: activeAccountRef.current?.username,
+            studyStats: updated,
+          });
           return updated;
         });
 
-        // Read the first Flashcard question aloud!
         if (generated[0]) {
           speechService.speak({
             text: `Fim do tópico ${topic.title}. Hora do Active Recall! Primeira pergunta: ${generated[0].question}`,
             blockType: 'heading',
             settings: voiceSettingsRef.current,
             geminiKeyFallback: providerConfigRef.current.apiKeys.gemini,
-            openAiKeyFallback: providerConfigRef.current.apiKeys.openai,
           });
         }
       } finally {
@@ -274,18 +399,25 @@ export const App: React.FC = () => {
       setWordProgressRatio(0);
       setReaderState('reading');
 
-      saveActiveDocument({ ...doc, currentSentenceIndex: boundedIndex });
+      updateDocumentReadingProgress(
+        doc,
+        boundedIndex,
+        activeAccountRef.current?.username
+      ).then((updatedLib) => {
+        setPdfLibrary(updatedLib);
+      });
 
       speechService.speak({
         text: sentence.text,
         blockType: sentence.blockType,
         settings: voiceSettingsRef.current,
         geminiKeyFallback: providerConfigRef.current.apiKeys.gemini,
-        openAiKeyFallback: providerConfigRef.current.apiKeys.openai,
         onStart: () => {
-          // Lookahead Pre-Fetching: synthesize sentence N+1 in the background while sentence N plays!
           const nextSentence = docRef.current.sentences[boundedIndex + 1];
-          if (nextSentence && voiceSettingsRef.current.prefetchNextSentence !== false) {
+          if (
+            nextSentence &&
+            voiceSettingsRef.current.prefetchNextSentence !== false
+          ) {
             speechService.prefetch(
               nextSentence.text,
               nextSentence.blockType,
@@ -310,14 +442,12 @@ export const App: React.FC = () => {
           const nextIdx = boundedIndex + 1;
           const currentDoc = docRef.current;
 
-          // If we reached the end of the document, generate the Schematic Summary!
           if (nextIdx >= currentDoc.sentences.length) {
             setReaderState('idle');
             handleGenerateSummary();
             return;
           }
 
-          // If we reached the end of a strategic topic, pause and launch Active Recall Flashcards!
           if (
             sentence.isTopicEnd &&
             voiceSettingsRef.current.autoFlashcardsOnTopicEnd
@@ -348,7 +478,6 @@ export const App: React.FC = () => {
       const cleanQuestion = questionText.trim();
       if (!cleanQuestion) return;
 
-      // Check voice commands for Flashcard reveal or resume
       const lowerCmd = cleanQuestion.toLowerCase();
       if (
         lowerCmd.includes('mostrar resposta') ||
@@ -365,7 +494,6 @@ export const App: React.FC = () => {
             text: firstUnrevealed.answer,
             settings: voiceSettingsRef.current,
             geminiKeyFallback: providerConfigRef.current.apiKeys.gemini,
-            openAiKeyFallback: providerConfigRef.current.apiKeys.openai,
           });
           return;
         }
@@ -397,7 +525,7 @@ export const App: React.FC = () => {
           : targetIdx;
       const currentSentence = doc.sentences[targetIdx] || doc.sentences[0];
       const config = providerConfigRef.current;
-      const providerMeta = PROVIDERS_CATALOG[config.providerId];
+      const providerMeta = PROVIDERS_CATALOG.gemini;
 
       const userTurn: ConversationMessage = {
         id: `user-${Date.now()}`,
@@ -415,10 +543,10 @@ export const App: React.FC = () => {
       messagesRef.current = updatedWithUser;
       saveConversationHistory(doc.id, updatedWithUser);
 
-      if (!config.apiKeys[config.providerId]?.trim()) {
+      if (!config.apiKeys.gemini?.trim()) {
         setReaderState('paused');
         setErrorBanner(
-          `Conecte sua API Key do ${providerMeta.name} para o Professor IA explicar com analogias e dicas de banca.`
+          'Conecte sua API Key gratuita do Google AI Studio (Gemini) para o Professor explicar com analogias e dicas de banca.'
         );
         setIsSettingsOpen(true);
         return;
@@ -456,7 +584,6 @@ export const App: React.FC = () => {
           text: aiReply,
           settings: voiceSettingsRef.current,
           geminiKeyFallback: config.apiKeys.gemini,
-          openAiKeyFallback: config.apiKeys.openai,
           onEnd: () => {
             if (voiceSettingsRef.current.autoResumeAfterAnswer) {
               speakSentenceAtIndex(resumeIdx);
@@ -470,7 +597,9 @@ export const App: React.FC = () => {
           },
         });
       } catch (err: any) {
-        setErrorBanner(err?.message || 'Erro ao obter explicação do Professor.');
+        setErrorBanner(
+          err?.message || 'Erro ao obter explicação do Professor Gemini.'
+        );
         setReaderState('paused');
       }
     },
@@ -497,7 +626,9 @@ export const App: React.FC = () => {
         setReaderState('paused');
       },
       onEnd: () => {
-        setReaderState((prev) => (prev === 'listening_user' ? 'paused' : prev));
+        setReaderState((prev) =>
+          prev === 'listening_user' ? 'paused' : prev
+        );
       },
     });
   }, [triggerAiInteraction]);
@@ -534,7 +665,37 @@ export const App: React.FC = () => {
     speechService.stopListening();
   };
 
-  // Upload a new PDF file
+  // Run Layer 3 Gemini AI Sanitizer on the currently open PDF
+  const handleRunGeminiCleanOnCurrentDoc = useCallback(async () => {
+    if (!providerConfigRef.current.apiKeys.gemini?.trim()) {
+      setIsSettingsOpen(true);
+      return;
+    }
+    setIsAiCleaningPdf(true);
+    try {
+      const { cleanedDoc, removedByAiCount } = await sanitizeDocumentWithGemini({
+        doc: docRef.current,
+        config: providerConfigRef.current,
+      });
+      setDocumentData(cleanedDoc);
+      docRef.current = cleanedDoc;
+      setCurrentSentenceIndex(0);
+      const nextLib = await saveDocumentToUserLibrary(
+        cleanedDoc,
+        activeAccountRef.current?.username
+      );
+      setPdfLibrary(nextLib);
+      setCleanNoticeBanner(
+        `✨ Limpeza Gemini concluída: ${
+          cleanedDoc.removedNoiseCount || removedByAiCount
+        } cabeçalhos, rodapés e trechos irrelevantes removidos para leitura limpa!`
+      );
+    } finally {
+      setIsAiCleaningPdf(false);
+    }
+  }, []);
+
+  // Upload a new PDF file, sanitize headers/footers + AI noise, and save to user's PDF library
   const handleUploadPdf = async (file: File) => {
     try {
       speechService.stopSpeaking();
@@ -542,25 +703,56 @@ export const App: React.FC = () => {
       setReaderState('idle');
       setIsLoadingPdf(true);
       setErrorBanner(null);
+      setCleanNoticeBanner(null);
 
       const buffer = await file.arrayBuffer();
-      const parsedDoc = await parsePdfArrayBuffer(
+      let parsedDoc = await parsePdfArrayBuffer(
         buffer,
         file.name,
         file.size,
         voiceSettings.sanitizeHeadersFooters
       );
 
+      // Layer 3: If Gemini API key is configured and AI PDF Sanitizer is enabled, clean remaining noise automatically!
+      if (
+        providerConfigRef.current.aiSanitizePdf !== false &&
+        providerConfigRef.current.apiKeys.gemini?.trim()
+      ) {
+        setIsAiCleaningPdf(true);
+        try {
+          const { cleanedDoc } = await sanitizeDocumentWithGemini({
+            doc: parsedDoc,
+            config: providerConfigRef.current,
+          });
+          parsedDoc = cleanedDoc;
+        } finally {
+          setIsAiCleaningPdf(false);
+        }
+      }
+
       setDocumentData(parsedDoc);
+      docRef.current = parsedDoc;
       setCurrentSentenceIndex(0);
       setWordProgressRatio(0);
       setMessages([]);
       setFlashcards([]);
       setSchematicSummary(null);
-      await saveActiveDocument(parsedDoc);
+
+      const nextLib = await saveDocumentToUserLibrary(
+        parsedDoc,
+        activeAccountRef.current?.username
+      );
+      setPdfLibrary(nextLib);
+
       await saveConversationHistory(parsedDoc.id, []);
       await saveFlashcards(parsedDoc.id, []);
       await saveSchematicSummary(parsedDoc.id, null);
+
+      if ((parsedDoc.removedNoiseCount || 0) > 0) {
+        setCleanNoticeBanner(
+          `🧹 Leitura Limpa: ${parsedDoc.removedNoiseCount} cabeçalhos, rodapés e informações irrelevantes foram removidos automaticamente deste PDF.`
+        );
+      }
     } catch (err: any) {
       setErrorBanner(
         `Erro ao processar o arquivo PDF "${file.name}": ${
@@ -572,9 +764,33 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleSelectLibraryDocument = async (docId: string) => {
+    const doc = await loadLibraryDocumentById(
+      docId,
+      activeAccountRef.current?.username
+    );
+    if (doc) {
+      await handleLoadDocumentIntoWorkspace(doc);
+    }
+  };
+
+  const handleDeleteLibraryDocument = async (docId: string) => {
+    const nextLib = await deleteDocumentFromLibrary(
+      docId,
+      activeAccountRef.current?.username
+    );
+    setPdfLibrary(nextLib);
+  };
+
   const handleSelectSentence = (globalIndex: number, autoPlay = true) => {
     setCurrentSentenceIndex(globalIndex);
     setWordProgressRatio(0);
+    updateDocumentReadingProgress(
+      documentData,
+      globalIndex,
+      activeAccountRef.current?.username
+    ).then((lib) => setPdfLibrary(lib));
+
     if (autoPlay) {
       speakSentenceAtIndex(globalIndex);
     } else {
@@ -617,6 +833,10 @@ export const App: React.FC = () => {
     const updated = { ...voiceSettings, rate: nextRate };
     setVoiceSettings(updated);
     saveVoiceSettings(updated);
+    syncSettingsToActiveAccount({
+      username: activeAccountRef.current?.username,
+      voiceSettings: updated,
+    });
 
     if (readerState === 'reading') {
       speakSentenceAtIndex(currentSentenceIndex);
@@ -658,7 +878,7 @@ export const App: React.FC = () => {
               Solte sua apostila PDF aqui
             </p>
             <p className="text-sm text-indigo-200">
-              Extração automática de coordenadas BBox, filtro Estratégia/Gran e divisão de tópicos
+              Remoção automática de cabeçalhos, rodapés e ruídos + salvamento na sua lista de leitura
             </p>
           </div>
         </div>
@@ -669,19 +889,42 @@ export const App: React.FC = () => {
         fileName={documentData.fileName}
         totalPages={documentData.totalPages}
         currentPage={currentPage}
+        removedNoiseCount={documentData.removedNoiseCount}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
         providerConfig={providerConfig}
+        activeAccount={activeAccount}
+        libraryCount={pdfLibrary.length}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenAccount={() => setIsAccountModalOpen(true)}
+        onOpenPdfLibrary={() => setIsPdfLibraryOpen(true)}
         onOpenNeuroscience={() => setIsNeuroModalOpen(true)}
         onUploadPdf={handleUploadPdf}
-        isLoadingPdf={isLoadingPdf}
+        isLoadingPdf={isLoadingPdf || isAiCleaningPdf}
         isAiPanelOpen={isAiPanelOpen}
         onToggleAiPanel={() => setIsAiPanelOpen((prev) => !prev)}
-        badgeCount={flashcards.filter((f) => !f.difficulty).length || messages.length}
+        badgeCount={
+          flashcards.filter((f) => !f.difficulty).length || messages.length
+        }
       />
 
-      {/* Explicit Voice Engine Error Banner (Decision 2 = Option A: Never silently fall back to robotic browser voice) */}
+      {/* Clean PDF Notification Banner */}
+      {cleanNoticeBanner && (
+        <div className="px-3 sm:px-6 py-1.5 bg-emerald-950/90 border-b border-emerald-500/30 flex items-center justify-between gap-2 z-20">
+          <p className="text-xs text-emerald-200 font-medium">
+            {cleanNoticeBanner}
+          </p>
+          <button
+            type="button"
+            onClick={() => setCleanNoticeBanner(null)}
+            className="text-xs text-emerald-300 hover:text-white font-bold px-2"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* Explicit Voice Engine Error Banner */}
       {errorBanner && (
         <div className="px-3 sm:px-6 py-2 bg-rose-950/90 border-b border-rose-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-2 z-20">
           <p className="text-xs text-rose-200 font-medium">{errorBanner}</p>
@@ -732,7 +975,7 @@ export const App: React.FC = () => {
           >
             <p className="text-xs text-indigo-100 line-clamp-2">
               {readerState === 'thinking_ai'
-                ? '👨‍🏫 Professor analisando sua dúvida...'
+                ? '👨‍🏫 Professor Gemini analisando sua dúvida...'
                 : `👨‍🏫 Professor: "${latestAiMessage?.content || 'Explicando em voz alta...'}"`}
             </p>
             <span className="text-[11px] font-semibold text-indigo-300 shrink-0 underline">
@@ -741,7 +984,7 @@ export const App: React.FC = () => {
           </div>
         )}
 
-      {/* Main 3-Area Study Dashboard: Central PDF/Reader + Right Panel (Flashcards/Summary/Professor) */}
+      {/* Main 3-Area Study Dashboard */}
       <main className="flex-1 flex flex-row overflow-hidden min-h-0 relative">
         <div className="flex-1 flex overflow-hidden min-h-0">
           {(viewMode === 'split' || viewMode === 'pdf') && (
@@ -776,7 +1019,9 @@ export const App: React.FC = () => {
                 readerState={readerState}
                 onSelectSentence={handleSelectSentence}
                 onAskAboutSentence={handleAskAboutSentence}
-                onTriggerTopicFlashcards={(tId) => handleTriggerTopicFlashcards(tId)}
+                onTriggerTopicFlashcards={(tId) =>
+                  handleTriggerTopicFlashcards(tId)
+                }
               />
             </div>
           )}
@@ -807,7 +1052,6 @@ export const App: React.FC = () => {
               text,
               settings: voiceSettings,
               geminiKeyFallback: providerConfig.apiKeys.gemini,
-              openAiKeyFallback: providerConfig.apiKeys.openai,
             });
           }}
           onResumePdfReading={() => speakSentenceAtIndex(currentSentenceIndex)}
@@ -838,6 +1082,10 @@ export const App: React.FC = () => {
                 flashcardsReviewedCount: prev.flashcardsReviewedCount + 1,
               };
               saveStudyStats(nextStats);
+              syncSettingsToActiveAccount({
+                username: activeAccountRef.current?.username,
+                studyStats: nextStats,
+              });
               return nextStats;
             });
           }}
@@ -880,7 +1128,7 @@ export const App: React.FC = () => {
         onResumeReadingNow={() => speakSentenceAtIndex(currentSentenceIndex)}
       />
 
-      {/* Expressive Voice & Multi-LLM Settings Modal */}
+      {/* Expressive Voice & Google AI Studio Settings Modal */}
       <ApiKeyModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
@@ -888,17 +1136,59 @@ export const App: React.FC = () => {
         onSaveProviderConfig={(newCfg) => {
           setProviderConfig(newCfg);
           saveProviderConfig(newCfg);
+          syncSettingsToActiveAccount({
+            username: activeAccount?.username,
+            providerConfig: newCfg,
+          }).then((updatedAcc) => {
+            if (updatedAcc) setActiveAccount(updatedAcc);
+          });
         }}
         voiceSettings={voiceSettings}
         onSaveVoiceSettings={(newVoice) => {
           setVoiceSettings(newVoice);
           saveVoiceSettings(newVoice);
+          syncSettingsToActiveAccount({
+            username: activeAccount?.username,
+            voiceSettings: newVoice,
+          }).then((updatedAcc) => {
+            if (updatedAcc) setActiveAccount(updatedAcc);
+          });
         }}
         downloadProgress={downloadProgress}
         engineStatus={engineStatus}
       />
 
-      {/* Neuroscience of the Method Modal (Endomarketing & Live Study Telemetry) */}
+      {/* User Account Modal (Persistent Login + Instant Settings Save) */}
+      <AccountModal
+        isOpen={isAccountModalOpen}
+        onClose={() => setIsAccountModalOpen(false)}
+        activeAccount={activeAccount}
+        providerConfig={providerConfig}
+        voiceSettings={voiceSettings}
+        pdfLibrary={pdfLibrary}
+        onAccountSuccess={handleAccountSuccess}
+        onAccountLogout={handleAccountLogout}
+        onOpenPdfLibrary={() => setIsPdfLibraryOpen(true)}
+      />
+
+      {/* User Personal PDF Reading Library Modal */}
+      <PdfLibraryModal
+        isOpen={isPdfLibraryOpen}
+        onClose={() => setIsPdfLibraryOpen(false)}
+        activeAccount={activeAccount}
+        activeDocumentId={documentData.id}
+        libraryItems={pdfLibrary}
+        isLoadingPdf={isLoadingPdf}
+        isAiCleaning={isAiCleaningPdf}
+        hasGeminiKey={Boolean(providerConfig.apiKeys.gemini?.trim())}
+        onSelectLibraryDocument={handleSelectLibraryDocument}
+        onDeleteLibraryDocument={handleDeleteLibraryDocument}
+        onUploadNewPdf={handleUploadPdf}
+        onRunGeminiCleanOnCurrentDoc={handleRunGeminiCleanOnCurrentDoc}
+        onOpenAccountModal={() => setIsAccountModalOpen(true)}
+      />
+
+      {/* Neuroscience of the Method Modal */}
       <NeuroscienceModal
         isOpen={isNeuroModalOpen}
         onClose={() => setIsNeuroModalOpen(false)}

@@ -24,10 +24,21 @@ const ABBREVIATION_REGEX =
   /\b(Sr|Sra|Dr|Dra|Prof|Profa|Cap|Art|Arts|Inc|Ltd|etc|ex|fig|pág|págs|vol|nº|no|vs|pe|Min|Rel|CF|CC|CP|CPC|CPP|CLT)\.\s*$/i;
 
 /**
- * Patterns typical of repetitive headers/footers/watermarks in Estratégia & Gran Cursos PDFs
+ * Comprehensive patterns typical of headers, footers, watermarks, TOC dots, and editorial noise
  */
 const HEADER_FOOTER_NOISE_REGEX =
-  /^(página\s+\d+\s*(de|\/)\s*\d+|pág\.\s*\d+|\d+\s+de\s+\d+|estratégia\s+concursos|gran\s+cursos\s+online|todos\s+os\s+direitos\s+reservados|proibida\s+a\s+reprodução|documento\s+exclusivo\s+para\s+uso\s+pessoal|cpf[:\s]*\d{3}\.?\d{3}\.?\d{3}-?\d{2}|www\.estrategiaconcursos\.com\.br|www\.grancursosonline\.com\.br|\d{1,4})$/i;
+  /^(página\s+\d+\s*(de|\/)?\s*\d*|pág\.?\s*\d+\s*(de|\/)?\s*\d*|\d+\s*(de|\/)\s*\d+|estratégia\s+concursos.*|gran\s+cursos\s+online.*|direção\s+concursos.*|alfacon\s+concursos.*|todos\s+os\s+direitos\s+reservados.*|proibida\s+a\s+reprodução.*|documento\s+exclusivo\s+para\s+uso\s+pessoal.*|licenciado\s+para\s+.*|impresso\s+por\s+.*|material\s+de\s+uso\s+exclusivo.*|cpf[:\s-]*\d{3}\.?\d{3}\.?\d{3}-?\d{2}.*|cnpj[:\s-]*\d{2}\..*|isbn[:\s-]*[\d-]+|issn[:\s-]*[\d-]+|https?:\/\/\S+|www\.\S+|\S+@\S+\.\S+|\d{1,4})$/i;
+
+/**
+ * Inline or mid-line watermarks / CPF / email / URL stamps that pollute lines
+ */
+const INLINE_WATERMARK_NOISE_REGEX =
+  /(cpf[:\s]*\d{3}\.?\d{3}\.?\d{3}-?\d{2}|todos os direitos reservados|proibida a reprodução total ou parcial|licenciado para [^-|•\n]+|impresso por [^-|•\n]+|www\.estrategiaconcursos\.com\.br|www\.grancursosonline\.com\.br)/gi;
+
+/**
+ * Table-of-contents dot leaders (e.g., "1.2 Direitos Individuais ................... 14")
+ */
+const TOC_DOT_LEADER_REGEX = /([.…\s]{5,}|\s+[-_]{4,}\s+)\d{1,4}\s*$/;
 
 const HEADING_TOPIC_REGEX =
   /^((capítulo|seção|tópico|título|tema|ponto)\s+[0-9ivxlcdm]+|\d+(\.\d+)*\s*[-–.)]?\s+[A-ZÀ-Ú])/i;
@@ -39,26 +50,104 @@ const QUESTION_LIST_REGEX =
   /^(questão\s+\d+|\d+\s*[.)]\s*\((cebraspe|cespe|fgv|fcc|vunesp|cesgranrio|ibfc|idecan|aocp))/i;
 
 /**
- * Checks if a line of text in a PDF is a repetitive header/footer artifact
+ * Normalizes a line into a canonical fingerprint (digits replaced with `#`, accents/case normalized)
+ * so running headers/footers like "Aula 02 - Direito Constitucional - Pág. 14 de 90"
+ * match across pages ("aula # - direito constitucional - pag. # de #").
+ */
+export function normalizeLineFingerprint(line: string): string {
+  return line
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\d+/g, '#')
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Detects line fingerprints that repeat across multiple pages (running headers, footers, or watermarks).
+ */
+export function detectRepetitiveHeaderFooterFingerprints(
+  pagesLines: { text: string; normY: number }[][],
+  sanitizeEnabled = true
+): Set<string> {
+  const repeatedFingerprints = new Set<string>();
+  if (!sanitizeEnabled || pagesLines.length < 2) {
+    return repeatedFingerprints;
+  }
+
+  const totalPages = pagesLines.length;
+  const pageFrequency = new Map<string, { count: number; marginHits: number }>();
+
+  for (const lines of pagesLines) {
+    const seenOnThisPage = new Set<string>();
+    for (const lineObj of lines) {
+      const trimmed = lineObj.text.trim();
+      if (!trimmed || trimmed.length > 140) continue;
+
+      const fp = normalizeLineFingerprint(trimmed);
+      if (fp.length < 3 || seenOnThisPage.has(fp)) continue;
+      seenOnThisPage.add(fp);
+
+      const isMarginZone = lineObj.normY < 0.12 || lineObj.normY > 0.88;
+      const prev = pageFrequency.get(fp) || { count: 0, marginHits: 0 };
+      pageFrequency.set(fp, {
+        count: prev.count + 1,
+        marginHits: prev.marginHits + (isMarginZone ? 1 : 0),
+      });
+    }
+  }
+
+  const minPagesForGlobalRepeat = totalPages >= 4 ? 3 : 2;
+  for (const [fp, stats] of pageFrequency.entries()) {
+    // If a short/medium line repeats across >= 3 pages (or >= 2 pages in top/bottom 12% margin zones)
+    if (
+      stats.count >= minPagesForGlobalRepeat ||
+      (stats.marginHits >= 2 && stats.count / totalPages >= 0.4)
+    ) {
+      repeatedFingerprints.add(fp);
+    }
+  }
+
+  return repeatedFingerprints;
+}
+
+/**
+ * Checks if a line of text in a PDF is a header, footer, watermark, TOC line, or non-content artifact
  */
 export function isHeaderOrFooterArtifact(
   text: string,
   normalizedY: number | null,
-  sanitizeEnabled = true
+  sanitizeEnabled = true,
+  repetitiveFingerprints?: Set<string>
 ): boolean {
   if (!sanitizeEnabled) return false;
   const trimmed = text.trim();
   if (!trimmed) return false;
 
+  // 1. Direct noise match (page numbers, platforms, copyright, URLs, emails, CPF, etc.)
   if (HEADER_FOOTER_NOISE_REGEX.test(trimmed)) {
     return true;
   }
 
-  // Top 5% or Bottom 5% of page with explicit watermark/copyright/CPF metadata
-  if (normalizedY !== null && (normalizedY < 0.05 || normalizedY > 0.95)) {
+  // 2. Table of contents dot leaders ("1. Introdução ............. 04")
+  if (TOC_DOT_LEADER_REGEX.test(trimmed)) {
+    return true;
+  }
+
+  // 3. Cross-page repetitive running header/footer/watermark fingerprint
+  if (repetitiveFingerprints && repetitiveFingerprints.size > 0) {
+    const fp = normalizeLineFingerprint(trimmed);
+    if (repetitiveFingerprints.has(fp)) {
+      return true;
+    }
+  }
+
+  // 4. Spatial Top Header Zone (< 8.5% of page height) & Bottom Footer Zone (> 91.5% of page height)
+  if (normalizedY !== null && (normalizedY < 0.085 || normalizedY > 0.915)) {
     if (
-      trimmed.length < 90 &&
-      /(cpf[:\s]*\d|todos os direitos reservados|proibida a reprodução|estratégia concursos|gran cursos)/i.test(
+      trimmed.length < 110 &&
+      /(cpf|cnpj|direitos reservados|reprodução|estratégia|gran cursos|direção concursos|alfacon|aula\s*\d+|prof\.|professor|curso\s+de|pág|página|\b\d+\s*\/\s*\d+\b|www\.|http|@|licenciado|impresso por|documento exclusivo|material de uso)/i.test(
         trimmed
       )
     ) {
@@ -67,6 +156,17 @@ export function isHeaderOrFooterArtifact(
   }
 
   return false;
+}
+
+/**
+ * Cleans inline watermark fragments from a line while keeping surrounding didactic text
+ */
+export function stripInlineWatermarks(text: string, sanitizeEnabled = true): string {
+  if (!sanitizeEnabled) return text;
+  return text
+    .replace(INLINE_WATERMARK_NOISE_REGEX, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 /**
@@ -197,13 +297,15 @@ export function finalizeTopicsAndSentences(
 }
 
 /**
- * Segments raw page text into paragraphs and indexed sentences with simulated vertical BBoxes
+ * Segments raw page text into paragraphs and indexed sentences with simulated or exact vertical BBoxes
  */
 export function segmentPageText(
   rawPageText: string,
   pageNumber: number,
   startingGlobalIndex: number,
-  paragraphBBoxes?: NormalizedBBox[][]
+  paragraphBBoxes?: NormalizedBBox[][],
+  sanitizeEnabled = true,
+  repetitiveFingerprints?: Set<string>
 ): {
   pageContent: PDFPageContent;
   sentences: PDFSentence[];
@@ -214,13 +316,23 @@ export function segmentPageText(
 
   const rawLines = normalized.split('\n');
   let ignoredHeaderFooterCount = 0;
-  const cleanedLines = rawLines.filter((line, idx) => {
+  const cleanedLines: string[] = [];
+
+  rawLines.forEach((line, idx) => {
     const approxY = rawLines.length > 1 ? idx / (rawLines.length - 1) : 0.5;
-    if (isHeaderOrFooterArtifact(line, approxY, true)) {
-      ignoredHeaderFooterCount++;
-      return false;
+    const strippedLine = stripInlineWatermarks(line, sanitizeEnabled);
+    if (
+      isHeaderOrFooterArtifact(
+        strippedLine,
+        approxY,
+        sanitizeEnabled,
+        repetitiveFingerprints
+      )
+    ) {
+      if (line.trim()) ignoredHeaderFooterCount++;
+      return;
     }
-    return true;
+    cleanedLines.push(strippedLine);
   });
 
   const rejoined = cleanedLines.join('\n');
@@ -307,8 +419,17 @@ export function segmentPageText(
   };
 }
 
+interface ReconstructedPdfLine {
+  text: string;
+  pdfY: number;
+  normY: number;
+  lineHeight: number;
+  boxes: NormalizedBBox[];
+}
+
 /**
  * Extracts structured text, sentences, topics, and exact normalized bounding boxes from a PDF ArrayBuffer
+ * using our 2-pass geometric + cross-page header/footer/watermark sanitizer.
  */
 export async function parsePdfArrayBuffer(
   fileBuffer: ArrayBuffer,
@@ -321,9 +442,9 @@ export async function parsePdfArrayBuffer(
   const pdfDoc = await loadingTask.promise;
 
   const totalPages = pdfDoc.numPages;
-  const pages: PDFPageContent[] = [];
-  const allSentences: PDFSentence[] = [];
+  const rawPagesLines: ReconstructedPdfLine[][] = [];
 
+  // PASS 1: Reconstruct complete horizontal lines per page with exact normalized coordinates
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
     const page = await pdfDoc.getPage(pageNum);
     const viewport = page.getViewport({ scale: 1.0 });
@@ -331,14 +452,7 @@ export async function parsePdfArrayBuffer(
     const pageHeight = viewport.height || 840;
 
     const textContent = await page.getTextContent();
-
-    let lastY: number | null = null;
-    let lastHeight = 12;
-    let currentParaText = '';
-    let currentParaBoxes: NormalizedBBox[] = [];
-    const paragraphsText: string[] = [];
-    const paragraphsBoxes: NormalizedBBox[][] = [];
-    let ignoredCount = 0;
+    const pageLines: ReconstructedPdfLine[] = [];
 
     for (const item of textContent.items as any[]) {
       if (typeof item.str !== 'string') continue;
@@ -351,7 +465,6 @@ export async function parsePdfArrayBuffer(
       const itemH = item.height || Math.abs(transform?.[3] || 12) || 12;
       const itemW = item.width || text.length * (itemH * 0.5);
 
-      // Convert PDF bottom-left origin to top-left normalized (0..1) coordinates
       const normX = Math.max(0, Math.min(0.95, pdfX / pageWidth));
       const normY = Math.max(
         0,
@@ -359,39 +472,101 @@ export async function parsePdfArrayBuffer(
       );
       const normW = Math.max(0.02, Math.min(1 - normX, itemW / pageWidth));
       const normH = Math.max(0.014, Math.min(0.1, (itemH * 1.35) / pageHeight));
+      const box: NormalizedBBox = {
+        x: normX,
+        y: normY,
+        width: normW,
+        height: normH,
+      };
 
-      if (isHeaderOrFooterArtifact(text, normY, sanitizeHeadersFooters)) {
+      const lastLine = pageLines[pageLines.length - 1];
+      if (
+        lastLine &&
+        Math.abs(lastLine.pdfY - pdfY) <= Math.max(lastLine.lineHeight, itemH) * 0.45
+      ) {
+        const needsSpace =
+          !lastLine.text.endsWith(' ') && !text.startsWith(' ');
+        lastLine.text += `${needsSpace ? ' ' : ''}${text}`;
+        lastLine.boxes.push(box);
+      } else {
+        pageLines.push({
+          text: text.trim(),
+          pdfY,
+          normY,
+          lineHeight: itemH,
+          boxes: [box],
+        });
+      }
+    }
+
+    rawPagesLines.push(pageLines);
+  }
+
+  // PASS 2: Detect cross-page repetitive running headers, footers, and watermarks across all pages
+  const repetitiveFingerprints = detectRepetitiveHeaderFooterFingerprints(
+    rawPagesLines,
+    sanitizeHeadersFooters
+  );
+
+  // PASS 3: Filter out noise lines and assemble clean study paragraphs + sentences
+  const pages: PDFPageContent[] = [];
+  const allSentences: PDFSentence[] = [];
+  let totalRemovedNoiseCount = 0;
+
+  for (let idx = 0; idx < rawPagesLines.length; idx++) {
+    const pageNum = idx + 1;
+    const pageLines = rawPagesLines[idx];
+
+    let lastY: number | null = null;
+    let lastHeight = 12;
+    let currentParaText = '';
+    let currentParaBoxes: NormalizedBBox[] = [];
+    const paragraphsText: string[] = [];
+    const paragraphsBoxes: NormalizedBBox[][] = [];
+    let ignoredCount = 0;
+
+    for (const line of pageLines) {
+      const cleanedLineText = stripInlineWatermarks(
+        line.text,
+        sanitizeHeadersFooters
+      );
+
+      if (
+        isHeaderOrFooterArtifact(
+          cleanedLineText,
+          line.normY,
+          sanitizeHeadersFooters,
+          repetitiveFingerprints
+        )
+      ) {
         ignoredCount++;
+        totalRemovedNoiseCount++;
         continue;
       }
 
       if (lastY !== null) {
-        const dy = Math.abs(lastY - pdfY);
+        const dy = Math.abs(lastY - line.pdfY);
         if (dy > lastHeight * 1.85) {
-          // New paragraph break
           if (currentParaText.trim()) {
             paragraphsText.push(currentParaText.trim());
             paragraphsBoxes.push(currentParaBoxes);
           }
           currentParaText = '';
           currentParaBoxes = [];
-        } else if (dy > lastHeight * 0.35) {
-          // Line break within same paragraph
+        } else {
           if (currentParaText.endsWith('-')) {
             currentParaText = currentParaText.slice(0, -1);
           } else if (!currentParaText.endsWith(' ')) {
             currentParaText += ' ';
           }
-        } else if (!currentParaText.endsWith(' ') && !text.startsWith(' ')) {
-          currentParaText += ' ';
         }
       }
 
-      currentParaText += text;
-      currentParaBoxes.push({ x: normX, y: normY, width: normW, height: normH });
+      currentParaText += cleanedLineText;
+      currentParaBoxes.push(...line.boxes);
 
-      lastY = pdfY;
-      lastHeight = itemH;
+      lastY = line.pdfY;
+      lastHeight = line.lineHeight;
     }
 
     if (currentParaText.trim()) {
@@ -404,7 +579,9 @@ export async function parsePdfArrayBuffer(
       joinedPageText,
       pageNum,
       allSentences.length,
-      paragraphsBoxes
+      paragraphsBoxes,
+      sanitizeHeadersFooters,
+      repetitiveFingerprints
     );
     pageContent.ignoredHeaderFooterCount += ignoredCount;
 
@@ -439,7 +616,7 @@ export async function parsePdfArrayBuffer(
   const topics = finalizeTopicsAndSentences(allSentences);
 
   return {
-    id: `doc-${Date.now()}`,
+    id: `doc-${fileName.replace(/[^a-zA-Z0-9_-]/g, '_')}-${fileSize}`,
     fileName,
     fileSize,
     totalPages,
@@ -448,6 +625,8 @@ export async function parsePdfArrayBuffer(
     sentences: allSentences,
     topics,
     currentSentenceIndex: 0,
+    removedNoiseCount: totalRemovedNoiseCount,
+    aiCleaned: false,
     pdfBytes: fileBuffer.slice(0),
   };
 }
@@ -497,5 +676,7 @@ export function createDemoDocument(): PDFDocumentData {
     sentences: allSentences,
     topics,
     currentSentenceIndex: 0,
+    removedNoiseCount: 0,
+    aiCleaned: true,
   };
 }
