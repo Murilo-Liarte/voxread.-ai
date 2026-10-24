@@ -57,11 +57,32 @@ export interface VoiceModelDownloadProgress {
   isReady: boolean;
 }
 
+export interface EngineStatus {
+  requested: TtsEngineMode;
+  active: TtsEngineMode | null;
+  voiceLabel: string;
+  state: 'idle' | 'loading' | 'playing' | 'failed' | 'fallback';
+  error?: string;
+  latencyMs?: number;
+}
+
+export interface VoiceDiagnosticResult {
+  engine: TtsEngineMode;
+  voiceLabel: string;
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+  audioBlob?: Blob;
+}
+
 export interface VoiceSettings {
+  settingsVersion?: number;
   ttsEngine: TtsEngineMode;
   piperVoiceId: PiperVoiceId;
   kokoroVoiceId: KokoroPtVoiceId;
   edgeVoiceId: EdgeNeuralVoiceId;
+  edgeProxyUrl?: string;
+  allowSystemVoiceFallback: boolean;
   browserVoiceURI: string;
   geminiVoiceName: 'Kore' | 'Aoede' | 'Puck' | 'Charon' | 'Fenrir';
   cloudVoiceId: 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer';

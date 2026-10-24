@@ -14,8 +14,12 @@ import { buildReadingSystemPrompt } from '../services/llmService';
 import {
   pcmBase64ToWavBlob,
   formatExpressiveTextForNeuralTts,
+  PIPER_WASM_PATHS,
+  speechService,
 } from '../services/speechService';
-import { loadVoiceSettings } from '../services/storageService';
+import { portugueseToKokoroIpa } from '../services/ptBrPhonemizer';
+import { loadVoiceSettings, createDefaultVoiceSettings } from '../services/storageService';
+import ortPkg from '../../node_modules/onnxruntime-web/package.json';
 
 describe('PDF Sentence, BBox & Estratégia/Gran Sanitizer', () => {
   it('splits paragraphs into natural sentences without breaking on common abbreviations', () => {
@@ -76,13 +80,53 @@ describe('PDF Sentence, BBox & Estratégia/Gran Sanitizer', () => {
   });
 });
 
-describe('Zero-API Expressive Neural TTS & Multi-LLM Adapter', () => {
-  it('defaults to Zero-API Piper Neural WASM engine with lookahead prefetch enabled', () => {
+describe('Zero-API Expressive Neural TTS & Anti-Robotic Fallback', () => {
+  it('defaults to Zero-API Piper Neural WASM engine with silent browser fallback disabled', () => {
     const settings = loadVoiceSettings();
     expect(settings.ttsEngine).toBe('piper_wasm');
     expect(settings.piperVoiceId).toBe('pt_BR-faber-medium');
     expect(settings.kokoroVoiceId).toBe('pf_dora');
+    expect(settings.allowSystemVoiceFallback).toBe(false);
     expect(settings.prefetchNextSentence).toBe(true);
+  });
+
+  it('matches PIPER_WASM_PATHS.onnxWasm to the exact installed onnxruntime-web version', () => {
+    expect(PIPER_WASM_PATHS.onnxWasm).toContain(`onnxruntime-web@${ortPkg.version}`);
+  });
+
+  it('converts Brazilian Portuguese text into Kokoro-82M IPA phonemes without npm:phonemizer', () => {
+    const ipa = portugueseToKokoroIpa(
+      'Atenção! Na Administração Pública, o gestor só age quando a lei autoriza.'
+    );
+    expect(ipa).toContain('atẽsˈɐ̃w');
+    expect(ipa).toContain('adiministɾasˈɐ̃w');
+    expect(ipa).toContain('pˈublikɐ');
+  });
+
+  it('does NOT silently fall back to browser voice when allowSystemVoiceFallback is false', async () => {
+    const statuses: string[] = [];
+    const unsub = speechService.subscribeEngineStatus((st) => {
+      statuses.push(st.state);
+    });
+
+    let reportedError = '';
+    await speechService.speak({
+      text: 'Teste sem chave de API.',
+      settings: {
+        ...createDefaultVoiceSettings(),
+        ttsEngine: 'gemini_tts',
+        allowSystemVoiceFallback: false,
+      },
+      geminiKeyFallback: '',
+      onError: (err) => {
+        reportedError = err;
+      },
+    });
+
+    unsub();
+    expect(statuses).toContain('failed');
+    expect(statuses).not.toContain('fallback');
+    expect(reportedError).toContain('Gemini');
   });
 
   it('shapes Portuguese text with expressive prosody pauses for neural TTS models', () => {

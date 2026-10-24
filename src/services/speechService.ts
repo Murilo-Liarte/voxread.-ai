@@ -1,7 +1,11 @@
+import { portugueseToKokoroIpa } from './ptBrPhonemizer';
 import type {
+  EngineStatus,
   KokoroPtVoiceId,
   PiperVoiceId,
   SentenceBlockType,
+  TtsEngineMode,
+  VoiceDiagnosticResult,
   VoiceModelDownloadProgress,
   VoiceSettings,
 } from '../types';
@@ -16,6 +20,38 @@ export interface SpeakOptions {
   onWordProgress?: (charIndex: number, progressRatio: number) => void;
   onEnd?: () => void;
   onError?: (err: string) => void;
+}
+
+/**
+ * Matches the exact installed version of `onnxruntime-web` (1.30.0) in node_modules
+ * so `ort-wasm-simd-threaded.mjs` and `.wasm` never 404 against the legacy 1.18.0 CDN.
+ */
+export const PIPER_WASM_PATHS = {
+  onnxWasm: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/',
+  piperData:
+    'https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize.data',
+  piperWasm:
+    'https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize.wasm',
+};
+
+export function getEngineVoiceLabel(settings: VoiceSettings): string {
+  switch (settings.ttsEngine) {
+    case 'piper_wasm':
+      return `Piper Neural · ${settings.piperVoiceId || 'pt_BR-faber-medium'}`;
+    case 'kokoro_webgpu':
+      return `Kokoro-82M · ${settings.kokoroVoiceId || 'pf_dora'}`;
+    case 'edge_neural':
+      return `Edge Neural · ${(settings.edgeVoiceId || 'pt-BR-FranciscaNeural').replace('pt-BR-', '')}`;
+    case 'gemini_tts':
+      return `Gemini Audio · ${settings.geminiVoiceName || 'Kore'}`;
+    case 'openai_cloud':
+      return `OpenAI TTS · ${settings.cloudVoiceId || 'nova'}`;
+    case 'elevenlabs':
+      return 'ElevenLabs Multilingual v2';
+    case 'browser':
+    default:
+      return 'Voz do Sistema (Navegador)';
+  }
 }
 
 /**
@@ -93,6 +129,7 @@ export function pcmBase64ToWavBlob(base64Pcm: string, sampleRate = 24000): Blob 
 }
 
 type DownloadProgressListener = (progress: VoiceModelDownloadProgress) => void;
+type EngineStatusListener = (status: EngineStatus) => void;
 
 class SpeechService {
   private playbackToken = 0;
@@ -103,9 +140,12 @@ class SpeechService {
 
   // Lookahead LRU Audio Cache (maps "engine:voice:text" -> Promise<Blob>)
   private audioBlobCache = new Map<string, Promise<Blob>>();
+  private activePiperVoiceId: PiperVoiceId | null = null;
+  private activePiperSessionPromise: Promise<any> | null = null;
   private kokoroInstancePromise: Promise<any> | null = null;
   private kokoroVoiceDataCache = new Map<string, Float32Array>();
   private progressListeners = new Set<DownloadProgressListener>();
+  private engineStatusListeners = new Set<EngineStatusListener>();
 
   public subscribeDownloadProgress(listener: DownloadProgressListener): () => void {
     this.progressListeners.add(listener);
@@ -114,8 +154,19 @@ class SpeechService {
     };
   }
 
+  public subscribeEngineStatus(listener: EngineStatusListener): () => void {
+    this.engineStatusListeners.add(listener);
+    return () => {
+      this.engineStatusListeners.delete(listener);
+    };
+  }
+
   private emitProgress(progress: VoiceModelDownloadProgress): void {
     this.progressListeners.forEach((fn) => fn(progress));
+  }
+
+  private emitEngineStatus(status: EngineStatus): void {
+    this.engineStatusListeners.forEach((fn) => fn(status));
   }
 
   public isTtsSupported(): boolean {
@@ -202,9 +253,6 @@ class SpeechService {
     }
   }
 
-  /**
-   * Builds a unique cache key for a synthesized sentence
-   */
   private getCacheKey(
     text: string,
     blockType: SentenceBlockType | undefined,
@@ -214,9 +262,9 @@ class SpeechService {
       settings.ttsEngine === 'piper_wasm'
         ? settings.piperVoiceId
         : settings.ttsEngine === 'kokoro_webgpu'
-        ? settings.kokoroVoiceId
+        ? `${settings.kokoroVoiceId}:${settings.rate}`
         : settings.ttsEngine === 'edge_neural'
-        ? settings.edgeVoiceId
+        ? `${settings.edgeVoiceId}:${settings.rate}`
         : settings.ttsEngine;
     return `${settings.ttsEngine}:${voiceId}:${blockType || 'normal'}:${text}`;
   }
@@ -245,7 +293,6 @@ class SpeechService {
     const key = this.getCacheKey(formatted, blockType, settings);
     if (this.audioBlobCache.has(key)) return;
 
-    // Limit cache size to 20 sentences
     if (this.audioBlobCache.size >= 20) {
       const oldestKey = this.audioBlobCache.keys().next().value;
       if (oldestKey) this.audioBlobCache.delete(oldestKey);
@@ -275,7 +322,7 @@ class SpeechService {
     return promise;
   }
 
-  private async synthesizeNeuralBlob(
+  public async synthesizeNeuralBlob(
     formattedText: string,
     blockType: SentenceBlockType | undefined,
     settings: VoiceSettings
@@ -289,13 +336,14 @@ class SpeechService {
     if (settings.ttsEngine === 'kokoro_webgpu') {
       return this.generateKokoroPortugueseBlob(
         formattedText,
-        settings.kokoroVoiceId || 'pf_dora'
+        settings.kokoroVoiceId || 'pf_dora',
+        settings.rate || 1.05
       );
     }
     if (settings.ttsEngine === 'edge_neural') {
       return this.generateEdgeNeuralBlob(formattedText, blockType, settings);
     }
-    throw new Error('Motor não suportado no pipeline de Blob neural.');
+    throw new Error(`Motor ${settings.ttsEngine} não suportado no pipeline neural.`);
   }
 
   /**
@@ -351,71 +399,96 @@ class SpeechService {
 
   /**
    * 1. Piper TTS WebAssembly (100% in-browser ONNX Runtime Web, Zero API Key)
+   * Explicitly configures `wasmPaths` to match `onnxruntime-web@1.30.0` so `ort-wasm-simd-threaded.mjs` never 404s.
    */
+  private async getPiperSession(voiceId: PiperVoiceId): Promise<any> {
+    if (this.activePiperSessionPromise && this.activePiperVoiceId === voiceId) {
+      return this.activePiperSessionPromise;
+    }
+
+    this.activePiperVoiceId = voiceId;
+    this.activePiperSessionPromise = (async () => {
+      const piper = await import('@mintplex-labs/piper-tts-web');
+      // Reset Piper's internal singleton when creating/switching voice sessions
+      (piper.TtsSession as any)._instance = null;
+
+      const session = await piper.TtsSession.create({
+        voiceId: voiceId as any,
+        wasmPaths: PIPER_WASM_PATHS,
+        progress: (prog: any) => {
+          const pct = prog?.total
+            ? Math.min(99, Math.round((prog.loaded * 100) / prog.total))
+            : 50;
+          this.emitProgress({
+            engine: 'piper_wasm',
+            voiceId,
+            percent: pct,
+            statusText: `Baixando modelo neural ${voiceId}: ${pct}%`,
+            isDownloading: true,
+            isReady: false,
+          });
+        },
+      });
+
+      this.emitProgress({
+        engine: 'piper_wasm',
+        voiceId,
+        percent: 100,
+        statusText: `Voz neural ${voiceId} ativa`,
+        isDownloading: false,
+        isReady: true,
+      });
+
+      return session;
+    })().catch((err) => {
+      this.activePiperSessionPromise = null;
+      this.activePiperVoiceId = null;
+      throw err;
+    });
+
+    return this.activePiperSessionPromise;
+  }
+
   private async generatePiperWasmBlob(
     text: string,
     voiceId: PiperVoiceId
   ): Promise<Blob> {
-    const piper = await import('@mintplex-labs/piper-tts-web');
-    const wavBlob = await piper.predict(
-      {
-        text,
-        voiceId: voiceId as any,
-      },
-      (prog) => {
-        const pct = prog.total
-          ? Math.min(99, Math.round((prog.loaded * 100) / prog.total))
-          : 50;
-        this.emitProgress({
-          engine: 'piper_wasm',
-          voiceId,
-          percent: pct,
-          statusText: `Baixando modelo neural ${voiceId}: ${pct}%`,
-          isDownloading: true,
-          isReady: false,
-        });
-      }
-    );
-
-    this.emitProgress({
-      engine: 'piper_wasm',
-      voiceId,
-      percent: 100,
-      statusText: `Voz neural ${voiceId} ativa`,
-      isDownloading: false,
-      isReady: true,
-    });
-
+    const session = await this.getPiperSession(voiceId);
+    const wavBlob = await session.predict(text);
+    if (!wavBlob || wavBlob.size < 100) {
+      throw new Error('Piper WASM retornou áudio vazio.');
+    }
     return wavBlob;
   }
 
   /**
-   * 2. Kokoro-82M v1.0 WebGPU/WASM with Native Brazilian Portuguese Phonemization (pf_dora, pm_alex, pm_santa)
+   * 2. Kokoro-82M v1.0 Neural with Native Brazilian Portuguese IPA Phonemizer (`ptBrPhonemizer.ts`)
+   * Fixes `Invalid language identifier: "pt-br"` from `npm:phonemizer`!
    */
   private async generateKokoroPortugueseBlob(
     text: string,
-    voiceId: KokoroPtVoiceId
+    voiceId: KokoroPtVoiceId,
+    speedRate = 1.05
   ): Promise<Blob> {
     if (!this.kokoroInstancePromise) {
       this.emitProgress({
         engine: 'kokoro_webgpu',
         voiceId,
-        percent: 10,
-        statusText: 'Inicializando motor neural Kokoro-82M v1.0 no navegador...',
+        percent: 5,
+        statusText: 'Inicializando motor neural Kokoro-82M v1.0 (86MB q8)...',
         isDownloading: true,
         isReady: false,
       });
 
       this.kokoroInstancePromise = (async () => {
         const { KokoroTTS } = await import('kokoro-js');
-        const hasWebGpu =
-          typeof navigator !== 'undefined' && 'gpu' in navigator;
 
+        // Use q8 + wasm in browser for compact 86MB download and 100% compatibility
         const instance = await KokoroTTS.from_pretrained(
           'onnx-community/Kokoro-82M-v1.0-ONNX',
           {
-            dtype: hasWebGpu ? 'fp32' : 'q8',
-            device: hasWebGpu ? 'webgpu' : 'wasm',
+            dtype: 'q8',
+            device: 'wasm',
             progress_callback: (info: any) => {
               if (typeof info?.progress === 'number') {
                 const pct = Math.min(99, Math.round(info.progress));
@@ -423,7 +496,7 @@ class SpeechService {
                   engine: 'kokoro_webgpu',
                   voiceId,
                   percent: pct,
-                  statusText: `Carregando Kokoro-82M (${pct}%)...`,
+                  statusText: `Baixando Kokoro-82M Neural (${pct}%)...`,
                   isDownloading: true,
                   isReady: false,
                 });
@@ -444,45 +517,61 @@ class SpeechService {
         return instance;
       })().catch((err) => {
         this.kokoroInstancePromise = null;
+        this.emitProgress({
+          engine: 'kokoro_webgpu',
+          voiceId,
+          percent: 0,
+          statusText: 'Falha ao carregar modelo Kokoro-82M',
+          isDownloading: false,
+          isReady: false,
+        });
         throw err;
       });
     }
 
     const tts = await this.kokoroInstancePromise;
-    const [{ phonemize }, { Tensor, RawAudio }] = await Promise.all([
-      import('phonemizer'),
-      import('@huggingface/transformers'),
-    ]);
+    const { Tensor, RawAudio } = await import('@huggingface/transformers');
 
-    // Convert Brazilian Portuguese text into IPA phonemes using eSpeak-NG WASM
-    const phonemeLines = await phonemize(text, 'pt-br');
-    const phonemes = Array.isArray(phonemeLines)
-      ? phonemeLines.join(' ').trim()
-      : String(phonemeLines).trim();
-
+    // Convert Brazilian Portuguese text into Kokoro-82M IPA phonemes
+    const phonemes = portugueseToKokoroIpa(text);
     const { input_ids } = tts.tokenizer(phonemes || text, {
       truncation: true,
     });
 
-    // Load and cache the Portuguese voice embedding vector (pf_dora, pm_alex, pm_santa)
+    // Load and validate the Portuguese voice embedding vector (pf_dora, pm_alex, pm_santa)
     let voiceFloat32 = this.kokoroVoiceDataCache.get(voiceId);
     if (!voiceFloat32) {
       const voiceUrl = `https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/${voiceId}.bin`;
       let buffer: ArrayBuffer | null = null;
+
       try {
-        const cache = await caches.open('kokoro-voices');
-        const matched = await cache.match(voiceUrl);
-        if (matched) {
-          buffer = await matched.arrayBuffer();
-        } else {
-          const res = await fetch(voiceUrl);
-          buffer = await res.arrayBuffer();
-          await cache.put(voiceUrl, new Response(buffer.slice(0)));
+        if (typeof caches !== 'undefined') {
+          const cache = await caches.open('kokoro-voices-v2');
+          const matched = await cache.match(voiceUrl);
+          if (matched && matched.ok) {
+            buffer = await matched.arrayBuffer();
+          }
         }
       } catch {
-        const res = await fetch(voiceUrl);
-        buffer = await res.arrayBuffer();
+        // Ignore CacheStorage errors
       }
+
+      if (!buffer || buffer.byteLength < 1024) {
+        const res = await fetch(voiceUrl);
+        if (!res.ok) {
+          throw new Error(`Não foi possível baixar o timbre ${voiceId} (${res.status}).`);
+        }
+        buffer = await res.arrayBuffer();
+        try {
+          if (typeof caches !== 'undefined' && buffer.byteLength >= 1024) {
+            const cache = await caches.open('kokoro-voices-v2');
+            await cache.put(voiceUrl, new Response(buffer.slice(0)));
+          }
+        } catch {
+          // Ignore CacheStorage write errors
+        }
+      }
+
       voiceFloat32 = new Float32Array(buffer);
       this.kokoroVoiceDataCache.set(voiceId, voiceFloat32);
     }
@@ -493,11 +582,12 @@ class SpeechService {
     );
     const offset = numTokens * 256;
     const styleSlice = voiceFloat32.slice(offset, offset + 256);
+    const boundedSpeed = Math.min(1.8, Math.max(0.75, speedRate || 1.0));
 
     const { waveform } = await tts.model({
       input_ids,
       style: new Tensor('float32', styleSlice, [1, 256]),
-      speed: new Tensor('float32', [1.0], [1]),
+      speed: new Tensor('float32', [boundedSpeed], [1]),
     });
 
     const rawAudio = new RawAudio(waveform.data, 24000);
@@ -506,6 +596,7 @@ class SpeechService {
 
   /**
    * 3. Microsoft Edge Neural TTS (FranciscaNeural, AntonioNeural, ThalitaMultilingualNeural)
+   * Supports Cloudflare Worker Proxy URL (`settings.edgeProxyUrl`) or local `/api/llm/edge-tts`.
    */
   private async generateEdgeNeuralBlob(
     text: string,
@@ -519,7 +610,9 @@ class SpeechService {
         ? '-2Hz'
         : '+0Hz';
 
-    const res = await fetch('/api/llm/edge-tts', {
+    const endpoint = settings.edgeProxyUrl?.trim() || '/api/llm/edge-tts';
+
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -531,15 +624,135 @@ class SpeechService {
     });
 
     if (!res.ok) {
-      throw new Error(`Edge TTS proxy indisponível (${res.status})`);
+      if (res.status === 404 || res.status === 405) {
+        throw new Error(
+          'No GitHub Pages estático, o Edge Neural requer a URL do Cloudflare Worker (ou use o Piper Neural / Kokoro-82M que rodam 100% no navegador).'
+        );
+      }
+      throw new Error(`Edge Neural Proxy HTTP ${res.status}`);
     }
 
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('audio')) {
-      throw new Error('Resposta não contém stream de áudio.');
+      throw new Error(
+        'O endpoint Edge Neural não retornou áudio (configure a URL do Cloudflare Worker ou use Piper / Kokoro-82M).'
+      );
     }
 
     return await res.blob();
+  }
+
+  /**
+   * Runs a real-time diagnostic test across the neural TTS engines so the user can see
+   * synthesis latency, verify status, and compare audio side by side.
+   */
+  public async runVoiceDiagnostics(
+    settings: VoiceSettings,
+    geminiKeyFallback?: string
+  ): Promise<VoiceDiagnosticResult[]> {
+    const sample =
+      'Atenção para esta dica de prova! Na Administração Pública, o gestor só age quando a lei autoriza.';
+    const results: VoiceDiagnosticResult[] = [];
+
+    // 1. Test Piper WASM
+    const t0Piper = performance.now();
+    try {
+      const voiceId = settings.piperVoiceId || 'pt_BR-faber-medium';
+      const blob = await this.generatePiperWasmBlob(sample, voiceId);
+      results.push({
+        engine: 'piper_wasm',
+        voiceLabel: `Piper Neural (${voiceId})`,
+        ok: true,
+        latencyMs: Math.round(performance.now() - t0Piper),
+        audioBlob: blob,
+      });
+    } catch (err: any) {
+      results.push({
+        engine: 'piper_wasm',
+        voiceLabel: `Piper Neural (${settings.piperVoiceId || 'pt_BR-faber-medium'})`,
+        ok: false,
+        latencyMs: Math.round(performance.now() - t0Piper),
+        error: err?.message || String(err),
+      });
+    }
+
+    // 2. Test Kokoro-82M PT-BR
+    const t0Kokoro = performance.now();
+    try {
+      const voiceId = settings.kokoroVoiceId || 'pf_dora';
+      const blob = await this.generateKokoroPortugueseBlob(
+        sample,
+        voiceId,
+        settings.rate || 1.05
+      );
+      results.push({
+        engine: 'kokoro_webgpu',
+        voiceLabel: `Kokoro-82M Neural (${voiceId})`,
+        ok: true,
+        latencyMs: Math.round(performance.now() - t0Kokoro),
+        audioBlob: blob,
+      });
+    } catch (err: any) {
+      results.push({
+        engine: 'kokoro_webgpu',
+        voiceLabel: `Kokoro-82M Neural (${settings.kokoroVoiceId || 'pf_dora'})`,
+        ok: false,
+        latencyMs: Math.round(performance.now() - t0Kokoro),
+        error: err?.message || String(err),
+      });
+    }
+
+    // 3. Test Edge Neural
+    const t0Edge = performance.now();
+    try {
+      const voiceId = settings.edgeVoiceId || 'pt-BR-FranciscaNeural';
+      const blob = await this.generateEdgeNeuralBlob(sample, 'alert', settings);
+      results.push({
+        engine: 'edge_neural',
+        voiceLabel: `Edge Neural (${voiceId})`,
+        ok: true,
+        latencyMs: Math.round(performance.now() - t0Edge),
+        audioBlob: blob,
+      });
+    } catch (err: any) {
+      results.push({
+        engine: 'edge_neural',
+        voiceLabel: `Edge Neural (${settings.edgeVoiceId || 'pt-BR-FranciscaNeural'})`,
+        ok: false,
+        latencyMs: Math.round(performance.now() - t0Edge),
+        error: err?.message || String(err),
+      });
+    }
+
+    // 4. Optional: Test Gemini Audio if key is configured
+    if (geminiKeyFallback?.trim()) {
+      const t0Gem = performance.now();
+      try {
+        const blob = await this.generateGeminiAudioBlob(
+          sample,
+          'alert',
+          settings,
+          geminiKeyFallback.trim()
+        );
+        results.push({
+          engine: 'gemini_tts',
+          voiceLabel: `Gemini Audio (${settings.geminiVoiceName || 'Kore'})`,
+          ok: true,
+          latencyMs: Math.round(performance.now() - t0Gem),
+          audioBlob: blob,
+        });
+      } catch (err: any) {
+        results.push({
+          engine: 'gemini_tts',
+          voiceLabel: `Gemini Audio (${settings.geminiVoiceName || 'Kore'})`,
+          ok: false,
+          latencyMs: Math.round(performance.now() - t0Gem),
+          error: err?.message || String(err),
+        });
+      }
+    }
+
+    return results;
   }
 
   public async speak(options: SpeakOptions): Promise<void> {
@@ -557,128 +770,157 @@ class SpeechService {
     }
 
     const { settings } = options;
+    const requestedEngine: TtsEngineMode = settings.ttsEngine;
+    const voiceLabel = getEngineVoiceLabel(settings);
     const geminiKey = options.geminiKeyFallback?.trim();
     const openAiKey =
       settings.openAiTtsApiKey?.trim() || options.openAiKeyFallback?.trim();
     const elevenKey = settings.elevenLabsApiKey?.trim();
 
-    // 1. Zero-API In-Browser Neural Engines (Piper WASM, Kokoro-82M WebGPU, Edge Neural)
-    if (
-      settings.ttsEngine === 'piper_wasm' ||
-      settings.ttsEngine === 'kokoro_webgpu' ||
-      settings.ttsEngine === 'edge_neural'
-    ) {
-      try {
-        const blob = await this.getOrSynthesizeBlob(
+    // Direct Browser Speech Synthesis when explicitly selected by the user
+    if (requestedEngine === 'browser') {
+      this.emitEngineStatus({
+        requested: 'browser',
+        active: 'browser',
+        voiceLabel,
+        state: 'playing',
+      });
+      this.speakWithBrowser(
+        formattedText,
+        options.blockType,
+        settings,
+        currentToken,
+        options
+      );
+      return;
+    }
+
+    this.emitEngineStatus({
+      requested: requestedEngine,
+      active: null,
+      voiceLabel,
+      state: 'loading',
+    });
+
+    const t0 = performance.now();
+
+    try {
+      let blob: Blob;
+      let playbackSpeed = 1.0;
+
+      if (
+        requestedEngine === 'piper_wasm' ||
+        requestedEngine === 'kokoro_webgpu' ||
+        requestedEngine === 'edge_neural'
+      ) {
+        blob = await this.getOrSynthesizeBlob(
           formattedText,
           options.blockType,
           settings
         );
-        if (currentToken !== this.playbackToken) return;
-        const playbackSpeed =
-          settings.ttsEngine === 'edge_neural' ? 1.0 : settings.rate || 1.05;
-        await this.playAudioBlobWithWordSync(
-          blob,
-          options.text,
-          playbackSpeed,
-          currentToken,
-          options
-        );
-        return;
-      } catch (err) {
-        console.warn(
-          `Aviso no motor ${settings.ttsEngine}, tentando Piper WASM / fallback neural:`,
-          err
-        );
-        // If Edge Neural was selected on static GitHub Pages, automatically use Piper WASM in-browser!
-        if (settings.ttsEngine === 'edge_neural') {
-          try {
-            const piperBlob = await this.generatePiperWasmBlob(
-              formattedText,
-              settings.piperVoiceId || 'pt_BR-faber-medium'
-            );
-            if (currentToken !== this.playbackToken) return;
-            await this.playAudioBlobWithWordSync(
-              piperBlob,
-              options.text,
-              settings.rate || 1.05,
-              currentToken,
-              options
-            );
-            return;
-          } catch {
-            // Fall through to browser synthesis if offline and model not cached
-          }
+        playbackSpeed =
+          requestedEngine === 'piper_wasm' ? settings.rate || 1.05 : 1.0;
+      } else if (requestedEngine === 'gemini_tts') {
+        if (!geminiKey) {
+          throw new Error(
+            'Chave de API do Google Gemini não configurada. Insira sua chave na aba 2 ou selecione Piper / Kokoro-82M (Zero-API).'
+          );
         }
-      }
-    }
-
-    // 2. Optional Cloud API Engines (Gemini TTS, ElevenLabs, OpenAI Cloud)
-    if (settings.ttsEngine === 'gemini_tts' && geminiKey) {
-      try {
-        await this.speakWithGeminiTts(
+        blob = await this.generateGeminiAudioBlob(
           formattedText,
           options.blockType,
           settings,
-          geminiKey,
-          currentToken,
-          options
+          geminiKey
         );
-        return;
-      } catch (err) {
-        console.warn('Fallback após erro no Gemini TTS:', err);
-      }
-    }
-
-    if (settings.ttsEngine === 'elevenlabs' && elevenKey) {
-      try {
-        await this.speakWithElevenLabs(
-          formattedText,
-          settings,
-          elevenKey,
-          currentToken,
-          options
-        );
-        return;
-      } catch (err) {
-        console.warn('Fallback após erro no ElevenLabs TTS:', err);
-      }
-    }
-
-    if (settings.ttsEngine === 'openai_cloud' && openAiKey) {
-      try {
-        await this.speakWithOpenAiCloud(
+        playbackSpeed = settings.rate || 1.05;
+      } else if (requestedEngine === 'openai_cloud') {
+        if (!openAiKey) {
+          throw new Error(
+            'Chave de API da OpenAI não configurada. Insira sua chave ou selecione Piper / Kokoro-82M (Zero-API).'
+          );
+        }
+        blob = await this.generateOpenAiAudioBlob(
           formattedText,
           options.blockType,
           settings,
-          openAiKey,
+          openAiKey
+        );
+        playbackSpeed = 1.0;
+      } else if (requestedEngine === 'elevenlabs') {
+        if (!elevenKey) {
+          throw new Error(
+            'Chave de API da ElevenLabs não configurada. Insira sua chave ou selecione Piper / Kokoro-82M (Zero-API).'
+          );
+        }
+        blob = await this.generateElevenLabsAudioBlob(
+          formattedText,
+          settings,
+          elevenKey
+        );
+        playbackSpeed = settings.rate || 1.05;
+      } else {
+        throw new Error(`Motor desconhecido: ${requestedEngine}`);
+      }
+
+      if (currentToken !== this.playbackToken) return;
+
+      const latencyMs = Math.round(performance.now() - t0);
+      this.emitEngineStatus({
+        requested: requestedEngine,
+        active: requestedEngine,
+        voiceLabel,
+        state: 'playing',
+        latencyMs,
+      });
+
+      await this.playAudioBlobWithWordSync(
+        blob,
+        options.text,
+        playbackSpeed,
+        currentToken,
+        options
+      );
+    } catch (err: any) {
+      if (currentToken !== this.playbackToken) return;
+      const reason = err?.message || String(err);
+
+      // Decision 2 (Option A): Never silently fall back to the robotic browser voice unless explicitly authorized
+      if (settings.allowSystemVoiceFallback) {
+        this.emitEngineStatus({
+          requested: requestedEngine,
+          active: 'browser',
+          voiceLabel: 'Voz do Sistema (Fallback Autorizado)',
+          state: 'fallback',
+          error: reason,
+        });
+        this.speakWithBrowser(
+          formattedText,
+          options.blockType,
+          settings,
           currentToken,
           options
         );
         return;
-      } catch (err) {
-        console.warn('Fallback após erro no OpenAI TTS:', err);
       }
-    }
 
-    // 3. Browser Neural TTS Fallback
-    this.speakWithBrowser(
-      formattedText,
-      options.blockType,
-      settings,
-      currentToken,
-      options
-    );
+      this.emitEngineStatus({
+        requested: requestedEngine,
+        active: null,
+        voiceLabel,
+        state: 'failed',
+        error: reason,
+      });
+
+      options.onError?.(`Falha no motor ${voiceLabel}: ${reason}`);
+    }
   }
 
-  private async speakWithGeminiTts(
+  private async generateGeminiAudioBlob(
     text: string,
     blockType: SentenceBlockType | undefined,
     settings: VoiceSettings,
-    apiKey: string,
-    token: number,
-    options: SpeakOptions
-  ): Promise<void> {
+    apiKey: string
+  ): Promise<Blob> {
     const styleDirective =
       blockType === 'alert'
         ? 'Leia em português do Brasil com entonação de professor de concursos dando um alerta importante de prova:'
@@ -706,34 +948,22 @@ class SpeechService {
       }),
     });
 
-    if (token !== this.playbackToken) return;
     if (!res.ok) throw new Error(`Gemini TTS HTTP ${res.status}`);
 
     const data = await res.json();
-    if (token !== this.playbackToken) return;
-
     const inlineData = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData;
     if (!inlineData?.data) {
       throw new Error('Gemini TTS não retornou dados de áudio.');
     }
 
-    const wavBlob = pcmBase64ToWavBlob(inlineData.data, 24000);
-    await this.playAudioBlobWithWordSync(
-      wavBlob,
-      text,
-      settings.rate,
-      token,
-      options
-    );
+    return pcmBase64ToWavBlob(inlineData.data, 24000);
   }
 
-  private async speakWithElevenLabs(
+  private async generateElevenLabsAudioBlob(
     text: string,
     settings: VoiceSettings,
-    apiKey: string,
-    token: number,
-    options: SpeakOptions
-  ): Promise<void> {
+    apiKey: string
+  ): Promise<Blob> {
     const voiceId =
       settings.elevenLabsVoiceId?.trim() || 'EXAVITQu4vr4xnSDxMaL';
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
@@ -758,21 +988,16 @@ class SpeechService {
       }),
     });
 
-    if (token !== this.playbackToken) return;
     if (!res.ok) throw new Error(`ElevenLabs HTTP ${res.status}`);
-
-    const blob = await res.blob();
-    await this.playAudioBlobWithWordSync(blob, text, settings.rate, token, options);
+    return await res.blob();
   }
 
-  private async speakWithOpenAiCloud(
+  private async generateOpenAiAudioBlob(
     text: string,
     blockType: SentenceBlockType | undefined,
     settings: VoiceSettings,
-    apiKey: string,
-    token: number,
-    options: SpeakOptions
-  ): Promise<void> {
+    apiKey: string
+  ): Promise<Blob> {
     const res = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: {
@@ -791,11 +1016,17 @@ class SpeechService {
       }),
     });
 
-    if (token !== this.playbackToken) return;
     if (!res.ok) throw new Error(`OpenAI TTS HTTP ${res.status}`);
+    return await res.blob();
+  }
 
-    const blob = await res.blob();
-    await this.playAudioBlobWithWordSync(blob, text, 1.0, token, options);
+  public async playAudioBlobDirect(blob: Blob, playbackRate = 1.0): Promise<void> {
+    this.stopSpeaking();
+    const token = ++this.playbackToken;
+    await this.playAudioBlobWithWordSync(blob, '', playbackRate, token, {
+      text: '',
+      settings: {} as any,
+    });
   }
 
   private async playAudioBlobWithWordSync(
@@ -842,7 +1073,7 @@ class SpeechService {
       URL.revokeObjectURL(audioUrl);
       if (token === this.playbackToken) {
         this.activeAudio = null;
-        options.onError?.('Erro ao reproduzir áudio neural.');
+        options.onError?.('Erro ao reproduzir stream de áudio neural.');
       }
     };
 
