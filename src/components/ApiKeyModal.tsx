@@ -525,7 +525,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                       </div>
                       <div>
                         <label className="block text-xs font-medium text-slate-300 mb-1">
-                          URL do Cloudflare Worker (Para GitHub Pages)
+                          Endpoint de Proxy (Opcional)
                         </label>
                         <input
                           type="text"
@@ -536,14 +536,11 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                               edgeProxyUrl: e.target.value,
                             }))
                           }
-                          placeholder="https://voxread-edge-tts-proxy.<sua-conta>.workers.dev"
+                          placeholder="https://..."
                           className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
                         />
                       </div>
                     </div>
-                    <p className="text-[11px] text-slate-400">
-                      💡 No servidor local (`npm run dev`), o proxy já está embutido. Para usar no GitHub Pages estático, publique o worker em `workers/edge-tts` (`npx wrangler deploy`) ou use **Piper / Kokoro-82M** sem precisar de proxy.
-                    </p>
                   </div>
                 )}
 

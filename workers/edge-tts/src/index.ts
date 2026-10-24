@@ -1,10 +1,6 @@
 /**
  * Cloudflare Worker Proxy for Microsoft Edge Read-Aloud Neural TTS
  * Voices: pt-BR-FranciscaNeural, pt-BR-ThalitaMultilingualNeural, pt-BR-AntonioNeural
- *
- * Deploy with:
- *   cd workers/edge-tts
- *   npx wrangler deploy
  */
 
 const TRUSTED_CLIENT_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
