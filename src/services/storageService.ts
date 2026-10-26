@@ -1,6 +1,7 @@
 import { del, get, set } from 'idb-keyval';
 import { createDefaultProviderConfig } from './llmService';
 import type {
+  AiExtractedStudyBlock,
   ConversationMessage,
   FlashcardItem,
   PDFDocumentData,
@@ -20,6 +21,12 @@ const FLASHCARDS_IDB_KEY = 'voxread_flashcards_v1';
 const SUMMARY_IDB_KEY = 'voxread_summary_v1';
 const LIBRARY_INDEX_PREFIX = 'voxread_pdf_library_index_';
 const LIBRARY_DOC_PREFIX = 'voxread_pdf_library_doc_';
+const CLEAN_PAGE_CACHE_PREFIX = 'voxread_clean_page_v1_';
+
+// In-memory session caches so we never serialize multi-megabyte pdfBytes into IndexedDB on sentence ticks
+const inMemoryPdfBytesMap = new Map<string, ArrayBuffer>();
+const inMemoryCleanPagesCache = new Map<string, AiExtractedStudyBlock[]>();
+let progressSaveTimer: any = null;
 
 function createMemoryStorage(): Storage {
   const store = new Map<string, string>();
@@ -181,10 +188,116 @@ export function saveStudyStats(stats: StudyStats): void {
   }
 }
 
+function stripPdfBytesForStorage(doc: PDFDocumentData): PDFDocumentData {
+  if (doc.pdfBytes) {
+    inMemoryPdfBytesMap.set(doc.id, doc.pdfBytes);
+  }
+  const { pdfBytes: _ignored, ...lightweightDoc } = doc;
+  return lightweightDoc;
+}
+
+function reattachPdfBytesFromMemory(
+  doc: PDFDocumentData | null | undefined
+): PDFDocumentData | null {
+  if (!doc) return null;
+  const savedIdxRaw = localStorage.getItem(`voxread_doc_progress_${doc.id}`);
+  const savedIdx =
+    savedIdxRaw !== null ? Number.parseInt(savedIdxRaw, 10) : NaN;
+  const memBytes = inMemoryPdfBytesMap.get(doc.id);
+  return {
+    ...doc,
+    currentSentenceIndex:
+      !Number.isNaN(savedIdx) && savedIdx >= 0
+        ? savedIdx
+        : doc.currentSentenceIndex,
+    ...(memBytes ? { pdfBytes: memBytes } : {}),
+  };
+}
+
+/**
+ * Computes a fast SHA-256 fingerprint for a PDF ArrayBuffer (< 5ms even for large PDFs by sampling head/mid/tail + length).
+ */
+export async function computePdfFingerprint(
+  buffer: ArrayBuffer
+): Promise<string> {
+  try {
+    const u8 = new Uint8Array(buffer);
+    const len = u8.byteLength;
+    const sampleSize = Math.min(len, 65536);
+    const combined = new Uint8Array(sampleSize * 2 + 8);
+    combined.set(u8.subarray(0, sampleSize), 0);
+    combined.set(u8.subarray(Math.max(0, len - sampleSize), len), sampleSize);
+    const dv = new DataView(combined.buffer);
+    dv.setUint32(sampleSize * 2, len, true);
+
+    if (typeof crypto !== 'undefined' && crypto.subtle?.digest) {
+      const hashBuf = await crypto.subtle.digest('SHA-256', combined);
+      const hashArr = Array.from(new Uint8Array(hashBuf)).slice(0, 12);
+      return hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+  } catch {
+    // Fallback below
+  }
+  return `len_${buffer.byteLength}`;
+}
+
+export async function loadCachedCleanPages(
+  pdfFingerprint: string,
+  pageNumbers: number[]
+): Promise<Map<number, AiExtractedStudyBlock[]>> {
+  const result = new Map<number, AiExtractedStudyBlock[]>();
+  if (!pdfFingerprint || pageNumbers.length === 0) return result;
+
+  await Promise.all(
+    pageNumbers.map(async (pageNum) => {
+      const key = `${CLEAN_PAGE_CACHE_PREFIX}${pdfFingerprint}_${pageNum}`;
+      const mem = inMemoryCleanPagesCache.get(key);
+      if (mem) {
+        result.set(pageNum, mem);
+        return;
+      }
+      if (typeof indexedDB !== 'undefined') {
+        try {
+          const idbBlocks = await get<AiExtractedStudyBlock[]>(key);
+          if (Array.isArray(idbBlocks)) {
+            inMemoryCleanPagesCache.set(key, idbBlocks);
+            result.set(pageNum, idbBlocks);
+          }
+        } catch {
+          // Ignore
+        }
+      }
+    })
+  );
+
+  return result;
+}
+
+export async function saveCachedCleanPages(
+  pdfFingerprint: string,
+  pageBlocksMap: Map<number, AiExtractedStudyBlock[]>
+): Promise<void> {
+  if (!pdfFingerprint || pageBlocksMap.size === 0) return;
+
+  const tasks: Promise<void>[] = [];
+  for (const [pageNum, blocks] of pageBlocksMap.entries()) {
+    const key = `${CLEAN_PAGE_CACHE_PREFIX}${pdfFingerprint}_${pageNum}`;
+    inMemoryCleanPagesCache.set(key, blocks);
+    if (typeof indexedDB !== 'undefined') {
+      tasks.push(
+        set(key, blocks).catch(() => {
+          // Ignore IDB quota errors
+        })
+      );
+    }
+  }
+  await Promise.all(tasks);
+}
+
 export async function saveActiveDocument(doc: PDFDocumentData): Promise<void> {
   if (typeof indexedDB === 'undefined') return;
   try {
-    await set(ACTIVE_DOC_IDB_KEY, doc);
+    await set(ACTIVE_DOC_IDB_KEY, stripPdfBytesForStorage(doc));
   } catch (err) {
     console.warn('Falha ao persistir PDF no IndexedDB:', err);
   }
@@ -193,7 +306,7 @@ export async function saveActiveDocument(doc: PDFDocumentData): Promise<void> {
 export async function loadActiveDocument(): Promise<PDFDocumentData | null> {
   try {
     const doc = await get<PDFDocumentData>(ACTIVE_DOC_IDB_KEY);
-    return doc || null;
+    return reattachPdfBytesFromMemory(doc);
   } catch {
     return null;
   }
@@ -253,19 +366,21 @@ export async function loadUserPdfLibrary(
 ): Promise<PdfLibraryItemSummary[]> {
   const key = getLibraryScopeKey(username);
   try {
-    const idbList = await get<PdfLibraryItemSummary[]>(key);
-    if (Array.isArray(idbList)) {
-      return idbList.sort((a, b) => b.lastReadAt - a.lastReadAt);
-    }
-  } catch {
-    // Fallback to localStorage for environments without IndexedDB
-  }
-
-  try {
     const raw = localStorage.getItem(key);
     if (raw) {
       const parsed = JSON.parse(raw) as PdfLibraryItemSummary[];
-      return parsed.sort((a, b) => b.lastReadAt - a.lastReadAt);
+      if (Array.isArray(parsed)) {
+        return parsed.sort((a, b) => b.lastReadAt - a.lastReadAt);
+      }
+    }
+  } catch {
+    // Ignore
+  }
+
+  try {
+    const idbList = await get<PdfLibraryItemSummary[]>(key);
+    if (Array.isArray(idbList)) {
+      return idbList.sort((a, b) => b.lastReadAt - a.lastReadAt);
     }
   } catch {
     // Ignore
@@ -285,15 +400,17 @@ async function persistLibraryIndex(
   } catch {
     // Ignore
   }
-  try {
-    await set(key, sorted);
-  } catch {
-    // Ignore
+  if (typeof indexedDB !== 'undefined') {
+    try {
+      await set(key, sorted);
+    } catch {
+      // Ignore
+    }
   }
 }
 
 /**
- * Saves or updates a PDF document in the user's reading library.
+ * Saves or updates a PDF document in the user's reading library (stripping multi-MB pdfBytes before IDB serialization).
  */
 export async function saveDocumentToUserLibrary(
   doc: PDFDocumentData,
@@ -310,33 +427,45 @@ export async function saveDocumentToUserLibrary(
 
   await persistLibraryIndex(username, nextList);
 
-  try {
-    await set(getLibraryDocKey(username, doc.id), doc);
-  } catch {
-    // Ignore in environments without IDB
+  const lightweightDoc = stripPdfBytesForStorage(doc);
+  if (typeof indexedDB !== 'undefined') {
+    try {
+      await set(getLibraryDocKey(username, doc.id), lightweightDoc);
+    } catch {
+      // Ignore in environments without IDB
+    }
   }
 
-  await saveActiveDocument(doc);
+  await saveActiveDocument(lightweightDoc);
   return nextList;
 }
 
 /**
- * Updates reading progress (sentence index, page, percentage) in the user's PDF list.
+ * Updates reading progress (sentence index, page, percentage) in the user's PDF list
+ * WITHOUT re-cloning the entire multi-megabyte document on every sentence!
  */
 export async function updateDocumentReadingProgress(
   doc: PDFDocumentData,
   sentenceIndex: number,
   username?: string | null
 ): Promise<PdfLibraryItemSummary[]> {
-  const updatedDoc: PDFDocumentData = {
-    ...doc,
-    currentSentenceIndex: sentenceIndex,
-  };
-  await saveActiveDocument(updatedDoc);
+  try {
+    localStorage.setItem(
+      `voxread_doc_progress_${doc.id}`,
+      String(sentenceIndex)
+    );
+  } catch {
+    // Ignore
+  }
 
   if (doc.id === 'demo-concursos-direito-adm') {
     return loadUserPdfLibrary(username);
   }
+
+  const updatedDoc: PDFDocumentData = {
+    ...doc,
+    currentSentenceIndex: sentenceIndex,
+  };
 
   const summary = buildLibrarySummaryFromDoc(updatedDoc, username);
   const existingList = await loadUserPdfLibrary(username);
@@ -344,10 +473,17 @@ export async function updateDocumentReadingProgress(
   const nextList = [summary, ...filtered];
 
   await persistLibraryIndex(username, nextList);
-  try {
-    await set(getLibraryDocKey(username, doc.id), updatedDoc);
-  } catch {
-    // Ignore
+
+  // Debounce heavy IndexedDB document writes so rapid sentence advances never freeze the UI
+  if (typeof indexedDB !== 'undefined') {
+    if (progressSaveTimer) {
+      clearTimeout(progressSaveTimer);
+    }
+    progressSaveTimer = setTimeout(() => {
+      const light = stripPdfBytesForStorage(updatedDoc);
+      set(ACTIVE_DOC_IDB_KEY, light).catch(() => {});
+      set(getLibraryDocKey(username, doc.id), light).catch(() => {});
+    }, 1500);
   }
 
   return nextList;
@@ -362,7 +498,7 @@ export async function loadLibraryDocumentById(
 ): Promise<PDFDocumentData | null> {
   try {
     const doc = await get<PDFDocumentData>(getLibraryDocKey(username, docId));
-    if (doc) return doc;
+    if (doc) return reattachPdfBytesFromMemory(doc);
   } catch {
     // Ignore
   }

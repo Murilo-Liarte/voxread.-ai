@@ -372,6 +372,284 @@ export function matchSentenceToLineBoxes(
   ];
 }
 
+export type ClassifiedLineRangeTuple = [number, number, string];
+
+function mapShortBlockCode(code: string): SentenceBlockType {
+  const c = (code || '').trim().toLowerCase();
+  if (c === 'h' || c === 'heading') return 'heading';
+  if (c === 'a' || c === 'alert') return 'alert';
+  if (c === 'q' || c === 'question_item' || c === 'question') return 'question_item';
+  return 'normal';
+}
+
+/**
+ * Converts compact Gemini line-range classifications (`[[startIdx, endIdx, "h|n|a|q"], ...]`)
+ * into clean `AiExtractedStudyBlock[]` using the original PDF lines and their exact BBoxes!
+ * Also splits multi-paragraph ranges using vertical PDF line spacing (`pdfY`) and joins hyphenated words.
+ */
+export function buildBlocksFromLineRanges(
+  batchPages: ExtractedRawPage[],
+  ranges: ClassifiedLineRangeTuple[]
+): AiExtractedStudyBlock[] {
+  const flatLines: { pageNumber: number; line: ReconstructedPdfLine }[] = [];
+  for (const page of batchPages) {
+    for (const line of page.lines) {
+      flatLines.push({ pageNumber: page.pageNumber, line });
+    }
+  }
+
+  if (flatLines.length === 0 || !Array.isArray(ranges) || ranges.length === 0) {
+    return [];
+  }
+
+  const blocks: AiExtractedStudyBlock[] = [];
+
+  const flushParagraph = (
+    pageNum: number,
+    blockType: SentenceBlockType,
+    textAcc: string,
+    boxesAcc: NormalizedBBox[]
+  ) => {
+    const cleaned = stripInlineWatermarks(textAcc, true)
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleaned.length < 3) return;
+    const effectiveType =
+      blockType !== 'normal' ? blockType : classifySentenceBlockType(cleaned);
+    blocks.push({
+      pageNumber: pageNum,
+      blockType: effectiveType,
+      text: cleaned,
+      bboxes: boxesAcc.length > 0 ? boxesAcc.slice(0, 32) : undefined,
+    });
+  };
+
+  for (const tuple of ranges) {
+    if (!Array.isArray(tuple) || tuple.length < 2) continue;
+    const rawStart = Number(tuple[0]);
+    const rawEnd = Number(tuple[1]);
+    if (Number.isNaN(rawStart) || Number.isNaN(rawEnd)) continue;
+
+    const startIdx = Math.max(
+      0,
+      Math.min(flatLines.length - 1, Math.min(rawStart, rawEnd))
+    );
+    const endIdx = Math.max(
+      0,
+      Math.min(flatLines.length - 1, Math.max(rawStart, rawEnd))
+    );
+    const rangeType = mapShortBlockCode(String(tuple[2] || 'n'));
+
+    let curPage = flatLines[startIdx].pageNumber;
+    let curType: SentenceBlockType = rangeType;
+    let curText = '';
+    let curBoxes: NormalizedBBox[] = [];
+    let lastY: number | null = null;
+    let lastH = 12;
+
+    for (let idx = startIdx; idx <= endIdx; idx++) {
+      const entry = flatLines[idx];
+      const lineText = entry.line.text.trim();
+      if (!lineText) continue;
+
+      const pageChanged = entry.pageNumber !== curPage;
+      const verticalGap =
+        lastY !== null &&
+        Math.abs(lastY - entry.line.pdfY) > Math.max(lastH, entry.line.lineHeight) * 1.85;
+      const startsNewSpecialBlock =
+        curText.length > 0 &&
+        (HEADING_TOPIC_REGEX.test(lineText) ||
+          ALERT_BOX_REGEX.test(lineText) ||
+          QUESTION_LIST_REGEX.test(lineText));
+
+      if (pageChanged || verticalGap || startsNewSpecialBlock) {
+        flushParagraph(curPage, curType, curText, curBoxes);
+        curPage = entry.pageNumber;
+        curType = rangeType;
+        curText = '';
+        curBoxes = [];
+      }
+
+      if (curText.length > 0) {
+        if (/([a-záéíóúâêôãõç])-\s*$/i.test(curText)) {
+          curText = curText.replace(/-\s*$/, '') + lineText;
+        } else {
+          curText += ' ' + lineText;
+        }
+      } else {
+        curText = lineText;
+      }
+
+      curBoxes.push(...entry.line.boxes);
+      lastY = entry.line.pdfY;
+      lastH = entry.line.lineHeight || 12;
+    }
+
+    if (curText.trim()) {
+      flushParagraph(curPage, curType, curText, curBoxes);
+    }
+  }
+
+  return blocks;
+}
+
+/**
+ * Instant local heuristic fallback that produces `AiExtractedStudyBlock[]` for a batch of pages
+ * if Gemini is rate-limited (429) or offline, so PDF loading NEVER hangs or fails.
+ */
+export function heuristicBlocksForPages(
+  rawPages: ExtractedRawPage[],
+  repetitiveFingerprints?: Set<string>
+): AiExtractedStudyBlock[] {
+  const fingerprints =
+    repetitiveFingerprints ||
+    detectRepetitiveHeaderFooterFingerprints(
+      rawPages.map((p) => p.lines),
+      true
+    );
+
+  const blocks: AiExtractedStudyBlock[] = [];
+
+  for (const rawPage of rawPages) {
+    let lastY: number | null = null;
+    let lastHeight = 12;
+    let currentParaText = '';
+    let currentParaBoxes: NormalizedBBox[] = [];
+
+    const flush = () => {
+      const cleaned = currentParaText.replace(/\s+/g, ' ').trim();
+      if (cleaned.length >= 3) {
+        blocks.push({
+          pageNumber: rawPage.pageNumber,
+          blockType: classifySentenceBlockType(cleaned),
+          text: cleaned,
+          bboxes: currentParaBoxes.slice(0, 32),
+        });
+      }
+      currentParaText = '';
+      currentParaBoxes = [];
+    };
+
+    for (const line of rawPage.lines) {
+      const cleanedLineText = stripInlineWatermarks(line.text, true);
+      if (
+        isHeaderOrFooterArtifact(
+          cleanedLineText,
+          line.normY,
+          true,
+          fingerprints
+        )
+      ) {
+        continue;
+      }
+
+      if (lastY !== null) {
+        const dy = Math.abs(lastY - line.pdfY);
+        const isNewSpecial =
+          HEADING_TOPIC_REGEX.test(cleanedLineText) ||
+          ALERT_BOX_REGEX.test(cleanedLineText) ||
+          QUESTION_LIST_REGEX.test(cleanedLineText);
+        if (dy > lastHeight * 1.85 || isNewSpecial) {
+          flush();
+        } else if (/([a-záéíóúâêôãõç])-\s*$/i.test(currentParaText)) {
+          currentParaText = currentParaText.replace(/-\s*$/, '');
+        } else if (currentParaText && !currentParaText.endsWith(' ')) {
+          currentParaText += ' ';
+        }
+      }
+
+      currentParaText += cleanedLineText;
+      currentParaBoxes.push(...line.boxes);
+      lastY = line.pdfY;
+      lastHeight = line.lineHeight || 12;
+    }
+
+    flush();
+  }
+
+  return blocks;
+}
+
+function convertPageBlocksToSentences(params: {
+  pageNum: number;
+  pageBlocks: AiExtractedStudyBlock[];
+  pageLines: ReconstructedPdfLine[];
+  startingGlobalIndex: number;
+}): {
+  pageContent: PDFPageContent;
+  sentences: PDFSentence[];
+} {
+  const { pageNum, pageBlocks, pageLines, startingGlobalIndex } = params;
+  const paragraphs: string[] = [];
+  const sentenceIds: string[] = [];
+  const sentences: PDFSentence[] = [];
+  let currentGlobal = startingGlobalIndex;
+
+  pageBlocks.forEach((block, pIdx) => {
+    paragraphs.push(block.text);
+    const paraSentences =
+      block.blockType === 'heading'
+        ? [block.text]
+        : splitParagraphIntoSentences(block.text);
+
+    const totalCharsInPara = Math.max(
+      1,
+      paraSentences.reduce((acc, s) => acc + s.length, 0)
+    );
+    let charCursor = 0;
+
+    paraSentences.forEach((sentText, sIdx) => {
+      const id = `p${pageNum}-par${pIdx}-s${sIdx}`;
+      const effectiveType =
+        block.blockType !== 'normal'
+          ? block.blockType
+          : classifySentenceBlockType(sentText);
+
+      const startRatio = charCursor / totalCharsInPara;
+      const endRatio = (charCursor + sentText.length) / totalCharsInPara;
+      charCursor += sentText.length;
+
+      let bboxes: NormalizedBBox[];
+      if (block.bboxes && block.bboxes.length > 0) {
+        const startBoxIdx = Math.floor(startRatio * block.bboxes.length);
+        const endBoxIdx = Math.max(
+          startBoxIdx + 1,
+          Math.ceil(endRatio * block.bboxes.length)
+        );
+        bboxes = block.bboxes.slice(startBoxIdx, endBoxIdx);
+      } else {
+        const approxY = 0.12 + (pIdx / Math.max(1, pageBlocks.length)) * 0.75;
+        bboxes = matchSentenceToLineBoxes(sentText, pageLines, approxY);
+      }
+
+      sentences.push({
+        id,
+        globalIndex: currentGlobal++,
+        pageNumber: pageNum,
+        paragraphIndex: pIdx,
+        sentenceInParagraph: sIdx,
+        text: sentText,
+        blockType: effectiveType,
+        topicId: 'topic-1',
+        topicTitle: block.topicTitle || 'Tópico de Estudo',
+        bboxes,
+      });
+      sentenceIds.push(id);
+    });
+  });
+
+  return {
+    pageContent: {
+      pageNumber: pageNum,
+      rawText: paragraphs.join('\n\n'),
+      paragraphs,
+      sentenceIds,
+      ignoredHeaderFooterCount: 0,
+    },
+    sentences,
+  };
+}
+
 /**
  * Builds a clean, Demo-style PDFDocumentData directly from the study blocks extracted by Gemini IA!
  * Logos, headers, footers, cover pages, TOCs, ads, and non-study noise are 100% absent.
@@ -385,6 +663,8 @@ export function buildCleanStudyDocumentFromAiBlocks(params: {
   startPage: number;
   endPage: number;
   pdfBytes?: ArrayBuffer;
+  pdfFingerprint?: string;
+  pendingPages?: number[];
 }): PDFDocumentData {
   const {
     blocks,
@@ -395,6 +675,8 @@ export function buildCleanStudyDocumentFromAiBlocks(params: {
     startPage,
     endPage,
     pdfBytes,
+    pdfFingerprint,
+    pendingPages,
   } = params;
 
   const pagesMap = new Map<number, AiExtractedStudyBlock[]>();
@@ -408,7 +690,6 @@ export function buildCleanStudyDocumentFromAiBlocks(params: {
 
   const pages: PDFPageContent[] = [];
   const allSentences: PDFSentence[] = [];
-  let currentGlobal = 0;
 
   const sortedPageNumbers = Array.from(pagesMap.keys()).sort((a, b) => a - b);
 
@@ -419,49 +700,17 @@ export function buildCleanStudyDocumentFromAiBlocks(params: {
     const rawPageObj = rawPages.find((rp) => rp.pageNumber === pageNum);
     const pageLines = rawPageObj?.lines || [];
 
-    const paragraphs: string[] = [];
-    const sentenceIds: string[] = [];
-
-    pageBlocks.forEach((block, pIdx) => {
-      paragraphs.push(block.text);
-      const paraSentences =
-        block.blockType === 'heading'
-          ? [block.text]
-          : splitParagraphIntoSentences(block.text);
-
-      paraSentences.forEach((sentText, sIdx) => {
-        const id = `p${pageNum}-par${pIdx}-s${sIdx}`;
-        const effectiveType =
-          block.blockType !== 'normal'
-            ? block.blockType
-            : classifySentenceBlockType(sentText);
-
-        const approxY = 0.12 + (pIdx / Math.max(1, pageBlocks.length)) * 0.75;
-        const bboxes = matchSentenceToLineBoxes(sentText, pageLines, approxY);
-
-        allSentences.push({
-          id,
-          globalIndex: currentGlobal++,
-          pageNumber: pageNum,
-          paragraphIndex: pIdx,
-          sentenceInParagraph: sIdx,
-          text: sentText,
-          blockType: effectiveType,
-          topicId: 'topic-1',
-          topicTitle: 'Tópico de Estudo',
-          bboxes,
-        });
-        sentenceIds.push(id);
-      });
+    const { pageContent, sentences } = convertPageBlocksToSentences({
+      pageNum,
+      pageBlocks,
+      pageLines,
+      startingGlobalIndex: allSentences.length,
     });
 
-    pages.push({
-      pageNumber: pageNum,
-      rawText: paragraphs.join('\n\n'),
-      paragraphs,
-      sentenceIds,
-      ignoredHeaderFooterCount: 0,
-    });
+    if (sentences.length > 0) {
+      pages.push(pageContent);
+      allSentences.push(...sentences);
+    }
   }
 
   const topics = finalizeTopicsAndSentences(allSentences);
@@ -475,13 +724,80 @@ export function buildCleanStudyDocumentFromAiBlocks(params: {
     selectedStartPage: startPage,
     selectedEndPage: endPage,
     cleaningMode: 'ai',
+    pdfFingerprint,
+    pendingPages: pendingPages && pendingPages.length > 0 ? pendingPages : undefined,
     uploadedAt: Date.now(),
     pages,
     sentences: allSentences,
     topics,
     currentSentenceIndex: 0,
     aiCleaned: true,
-    pdfBytes: pdfBytes ? pdfBytes.slice(0) : undefined,
+    pdfBytes,
+  };
+}
+
+/**
+ * Appends newly cleaned study pages to the end of an existing `PDFDocumentData` during progressive loading.
+ * Preserves all existing `globalIndex` and `id` values so active voice playback never jumps or resets!
+ */
+export function appendCleanStudyBlocksToDocument(params: {
+  doc: PDFDocumentData;
+  newBlocks: AiExtractedStudyBlock[];
+  rawPages: ExtractedRawPage[];
+  completedPages: number[];
+}): PDFDocumentData {
+  const { doc, newBlocks, rawPages, completedPages } = params;
+
+  const existingPageSet = new Set(doc.pages.map((p) => p.pageNumber));
+  const pagesMap = new Map<number, AiExtractedStudyBlock[]>();
+
+  for (const b of newBlocks) {
+    if (existingPageSet.has(b.pageNumber)) continue;
+    const text = b.text?.trim();
+    if (!text) continue;
+    const list = pagesMap.get(b.pageNumber) || [];
+    list.push({ ...b, text });
+    pagesMap.set(b.pageNumber, list);
+  }
+
+  const nextPages = [...doc.pages];
+  const nextSentences = doc.sentences.map((s) => ({ ...s }));
+
+  const sortedNewPageNumbers = Array.from(pagesMap.keys()).sort((a, b) => a - b);
+
+  for (const pageNum of sortedNewPageNumbers) {
+    const pageBlocks = pagesMap.get(pageNum) || [];
+    if (pageBlocks.length === 0) continue;
+
+    const rawPageObj = rawPages.find((rp) => rp.pageNumber === pageNum);
+    const pageLines = rawPageObj?.lines || [];
+
+    const { pageContent, sentences } = convertPageBlocksToSentences({
+      pageNum,
+      pageBlocks,
+      pageLines,
+      startingGlobalIndex: nextSentences.length,
+    });
+
+    if (sentences.length > 0) {
+      nextPages.push(pageContent);
+      nextSentences.push(...sentences);
+    }
+  }
+
+  const completedSet = new Set(completedPages);
+  const remainingPending = (doc.pendingPages || []).filter(
+    (p) => !completedSet.has(p)
+  );
+
+  const topics = finalizeTopicsAndSentences(nextSentences);
+
+  return {
+    ...doc,
+    pages: nextPages,
+    sentences: nextSentences,
+    topics,
+    pendingPages: remainingPending.length > 0 ? remainingPending : undefined,
   };
 }
 
@@ -689,6 +1005,11 @@ export async function extractRawPagesForRange(
       pageNumber: pageNum,
       lines: pageLines,
     });
+
+    // Yield to browser event loop every 4 pages to keep UI 100% responsive
+    if ((pageNum - startPage + 1) % 4 === 0) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
   }
 
   return {

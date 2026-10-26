@@ -94,6 +94,7 @@ export interface AiExtractedStudyBlock {
   blockType: SentenceBlockType;
   topicTitle?: string;
   text: string;
+  bboxes?: NormalizedBBox[];
 }
 
 export interface PDFSentence {
@@ -135,6 +136,8 @@ export interface PDFDocumentData {
   selectedStartPage?: number;
   selectedEndPage?: number;
   cleaningMode?: 'ai' | 'basic';
+  pdfFingerprint?: string;
+  pendingPages?: number[];
   uploadedAt: number;
   pages: PDFPageContent[];
   sentences: PDFSentence[];

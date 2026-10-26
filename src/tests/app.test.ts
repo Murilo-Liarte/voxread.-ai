@@ -9,6 +9,8 @@ import {
   stripInlineWatermarks,
   normalizePageRange,
   buildCleanStudyDocumentFromAiBlocks,
+  buildBlocksFromLineRanges,
+  appendCleanStudyBlocksToDocument,
 } from '../services/pdfService';
 import {
   buildProviderRequest,
@@ -31,6 +33,9 @@ import {
   loadUserPdfLibrary,
   updateDocumentReadingProgress,
   deleteDocumentFromLibrary,
+  computePdfFingerprint,
+  saveCachedCleanPages,
+  loadCachedCleanPages,
 } from '../services/storageService';
 import {
   registerAccount,
@@ -418,5 +423,198 @@ describe('Exclusive Piper Neural WASM Voice Engine & Permanent Cache', () => {
     expect(prompt).toContain(demo.fileName);
     expect(prompt).toContain('Cebraspe');
     expect(prompt).toContain('Podemos continuar a leitura?');
+  });
+});
+
+describe('Fast Line-Range Gemini Classification, Progressive PDF Loading & Page Cache', () => {
+  it('converts compact Gemini line-range tuples into clean study blocks with joined hyphens and exact BBoxes', () => {
+    const lines = [
+      {
+        text: 'Curso Estratégia Concursos - Aula 01 - Pág. 10',
+        pdfY: 790,
+        normY: 0.03,
+        lineHeight: 10,
+        boxes: [{ x: 0.05, y: 0.02, width: 0.8, height: 0.02 }],
+      },
+      {
+        text: '2.1 Poder Constituinte Originário',
+        pdfY: 720,
+        normY: 0.14,
+        lineHeight: 14,
+        boxes: [{ x: 0.08, y: 0.13, width: 0.65, height: 0.03 }],
+      },
+      {
+        text: 'O poder constituinte originário instaura uma nova ordem consti-',
+        pdfY: 680,
+        normY: 0.2,
+        lineHeight: 12,
+        boxes: [{ x: 0.08, y: 0.19, width: 0.82, height: 0.025 }],
+      },
+      {
+        text: 'tucional de forma autônoma e ilimitada juridicamente.',
+        pdfY: 664,
+        normY: 0.23,
+        lineHeight: 12,
+        boxes: [{ x: 0.08, y: 0.22, width: 0.78, height: 0.025 }],
+      },
+    ];
+
+    const blocks = buildBlocksFromLineRanges(
+      [{ pageNumber: 10, lines }],
+      [
+        [1, 1, 'h'],
+        [2, 3, 'n'],
+      ]
+    );
+
+    expect(blocks.length).toBe(2);
+    expect(blocks[0].blockType).toBe('heading');
+    expect(blocks[0].text).toBe('2.1 Poder Constituinte Originário');
+    expect(blocks[1].blockType).toBe('normal');
+    expect(blocks[1].text).toBe(
+      'O poder constituinte originário instaura uma nova ordem constitucional de forma autônoma e ilimitada juridicamente.'
+    );
+    expect(blocks[1].bboxes?.length).toBe(2);
+  });
+
+  it('progressively appends new background pages to an active document without altering existing sentence indices', () => {
+    const rawPages = [
+      {
+        pageNumber: 1,
+        lines: [
+          {
+            text: '1. Introdução ao Direito Administrativo',
+            pdfY: 700,
+            normY: 0.15,
+            lineHeight: 14,
+            boxes: [{ x: 0.1, y: 0.14, width: 0.7, height: 0.03 }],
+          },
+          {
+            text: 'O Direito Administrativo rege a função administrativa do Estado.',
+            pdfY: 660,
+            normY: 0.22,
+            lineHeight: 12,
+            boxes: [{ x: 0.1, y: 0.21, width: 0.8, height: 0.03 }],
+          },
+        ],
+      },
+      {
+        pageNumber: 2,
+        lines: [
+          {
+            text: '2. Regime Jurídico Administrativo',
+            pdfY: 700,
+            normY: 0.15,
+            lineHeight: 14,
+            boxes: [{ x: 0.1, y: 0.14, width: 0.7, height: 0.03 }],
+          },
+          {
+            text: 'Baseia-se na supremacia e na indisponibilidade do interesse público.',
+            pdfY: 660,
+            normY: 0.22,
+            lineHeight: 12,
+            boxes: [{ x: 0.1, y: 0.21, width: 0.8, height: 0.03 }],
+          },
+        ],
+      },
+    ];
+
+    const initialDoc = buildCleanStudyDocumentFromAiBlocks({
+      fileName: 'Apostila_Progressiva.pdf',
+      fileSize: 1024000,
+      originalTotalPages: 10,
+      startPage: 1,
+      endPage: 2,
+      rawPages,
+      blocks: [
+        {
+          pageNumber: 1,
+          blockType: 'heading',
+          text: '1. Introdução ao Direito Administrativo',
+        },
+        {
+          pageNumber: 1,
+          blockType: 'normal',
+          text: 'O Direito Administrativo rege a função administrativa do Estado.',
+        },
+      ],
+      pendingPages: [2],
+    });
+
+    expect(initialDoc.sentences.length).toBe(2);
+    expect(initialDoc.pendingPages).toEqual([2]);
+    const firstSentenceId = initialDoc.sentences[0].id;
+    const secondSentenceId = initialDoc.sentences[1].id;
+
+    const updatedDoc = appendCleanStudyBlocksToDocument({
+      doc: initialDoc,
+      rawPages,
+      newBlocks: [
+        {
+          pageNumber: 2,
+          blockType: 'heading',
+          text: '2. Regime Jurídico Administrativo',
+        },
+        {
+          pageNumber: 2,
+          blockType: 'normal',
+          text: 'Baseia-se na supremacia e na indisponibilidade do interesse público.',
+        },
+      ],
+      completedPages: [2],
+    });
+
+    expect(updatedDoc.sentences.length).toBe(4);
+    expect(updatedDoc.pendingPages ?? []).toEqual([]);
+    // Existing sentence IDs and globalIndex must remain untouched so active audio never skips
+    expect(updatedDoc.sentences[0].id).toBe(firstSentenceId);
+    expect(updatedDoc.sentences[0].globalIndex).toBe(0);
+    expect(updatedDoc.sentences[1].id).toBe(secondSentenceId);
+    expect(updatedDoc.sentences[1].globalIndex).toBe(1);
+    expect(updatedDoc.sentences[2].globalIndex).toBe(2);
+    expect(updatedDoc.sentences[3].globalIndex).toBe(3);
+  });
+
+  it('includes maxOutputTokens and thinkingBudget: 0 when disableThinking is enabled on Gemini 2.5 models', () => {
+    const req = buildProviderRequest({
+      provider: 'gemini',
+      apiKey: 'AIzaTestKey123',
+      model: 'gemini-2.5-flash-lite',
+      systemPrompt: 'Classifique linhas.',
+      messages: [{ role: 'user', content: '=== PAGINA 1 ===' }],
+      responseMimeType: 'application/json',
+      maxOutputTokens: 1024,
+      disableThinking: true,
+    });
+
+    expect(req.body).toContain('"maxOutputTokens":1024');
+    expect(req.body).toContain('"thinkingBudget":0');
+  });
+
+  it('caches and reloads cleaned study blocks per page using PDF fingerprint', async () => {
+    const dummyBuffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer;
+    const fp = await computePdfFingerprint(dummyBuffer);
+    expect(fp.length).toBeGreaterThan(4);
+
+    const mapToSave = new Map([
+      [
+        5,
+        [
+          {
+            pageNumber: 5,
+            blockType: 'normal' as const,
+            text: 'Conteúdo limpo em cache para abertura instantânea.',
+          },
+        ],
+      ],
+    ]);
+    await saveCachedCleanPages(fp, mapToSave);
+
+    const cachedMap = await loadCachedCleanPages(fp, [5, 6]);
+    expect(cachedMap.has(5)).toBe(true);
+    expect(cachedMap.has(6)).toBe(false);
+    expect(cachedMap.get(5)?.[0].text).toBe(
+      'Conteúdo limpo em cache para abertura instantânea.'
+    );
   });
 });

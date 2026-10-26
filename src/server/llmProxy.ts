@@ -12,6 +12,8 @@ export interface LlmChatRequestBody {
   messages: ChatMessagePayload[];
   temperature?: number;
   responseMimeType?: string;
+  maxOutputTokens?: number;
+  disableThinking?: boolean;
 }
 
 export interface PreparedProviderRequest {
@@ -33,6 +35,8 @@ export function buildProviderRequest(
     messages,
     temperature = 0.25,
     responseMimeType,
+    maxOutputTokens,
+    disableThinking,
   } = req;
   const trimmedKey = apiKey.trim();
   const baseUrl = (req.baseUrl?.trim() || GEMINI_DEFAULT_BASE_URL).replace(
@@ -58,6 +62,12 @@ export function buildProviderRequest(
   };
   if (responseMimeType) {
     generationConfig.responseMimeType = responseMimeType;
+  }
+  if (typeof maxOutputTokens === 'number' && maxOutputTokens > 0) {
+    generationConfig.maxOutputTokens = maxOutputTokens;
+  }
+  if (disableThinking && /gemini-2\.5/i.test(cleanModel)) {
+    generationConfig.thinkingConfig = { thinkingBudget: 0 };
   }
 
   return {

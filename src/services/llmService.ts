@@ -1,5 +1,12 @@
 import { buildProviderRequest, extractProviderText } from '../server/llmProxy';
-import { finalizeTopicsAndSentences, type ExtractedRawPage } from './pdfService';
+import {
+  buildBlocksFromLineRanges,
+  detectRepetitiveHeaderFooterFingerprints,
+  finalizeTopicsAndSentences,
+  heuristicBlocksForPages,
+  type ClassifiedLineRangeTuple,
+  type ExtractedRawPage,
+} from './pdfService';
 import type {
   AiExtractedStudyBlock,
   ConversationMessage,
@@ -217,6 +224,9 @@ async function executeGeminiRequestWithModel(params: {
   messages: { role: 'user' | 'assistant'; content: string }[];
   temperature?: number;
   responseMimeType?: string;
+  maxOutputTokens?: number;
+  disableThinking?: boolean;
+  signal?: AbortSignal;
 }): Promise<string> {
   const payload = {
     provider: 'gemini' as const,
@@ -227,14 +237,16 @@ async function executeGeminiRequestWithModel(params: {
     messages: params.messages,
     temperature: params.temperature ?? 0.35,
     responseMimeType: params.responseMimeType,
+    maxOutputTokens: params.maxOutputTokens,
+    disableThinking: params.disableThinking,
   };
 
-  // Direct call to Google AI Studio API (works identically on GitHub Pages and localhost)
   const directReq = buildProviderRequest(payload);
   const directRes = await fetch(directReq.url, {
     method: 'POST',
     headers: directReq.headers,
     body: directReq.body,
+    signal: params.signal,
   });
 
   if (!directRes.ok) {
@@ -257,8 +269,23 @@ export async function callLlmAssistant(params: {
   userQuestion: string;
   temperature?: number;
   responseMimeType?: string;
+  maxOutputTokens?: number;
+  disableThinking?: boolean;
+  allowModelFallback?: boolean;
+  signal?: AbortSignal;
 }): Promise<string> {
-  const { config, systemPrompt, history, userQuestion, temperature, responseMimeType } = params;
+  const {
+    config,
+    systemPrompt,
+    history,
+    userQuestion,
+    temperature,
+    responseMimeType,
+    maxOutputTokens,
+    disableThinking,
+    allowModelFallback = true,
+    signal,
+  } = params;
   const apiKey = config.apiKeys.gemini?.trim();
   const preferredModel =
     config.selectedModels.gemini?.trim() || PROVIDERS_CATALOG.gemini.defaultModel;
@@ -280,8 +307,34 @@ export async function callLlmAssistant(params: {
     { role: 'user' as const, content: userQuestion },
   ];
 
-  // Try preferred model first; if 404 (model alias not enabled in region) or 429 (free tier rate limit on that model),
-  // automatically fall back through GEMINI_FREE_TIER_FALLBACK_CHAIN!
+  // When allowModelFallback is false (fast PDF extraction), only try the preferred model (with 1 fast retry on 429/503)
+  if (!allowModelFallback) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await executeGeminiRequestWithModel({
+          apiKey,
+          model: preferredModel,
+          baseUrl,
+          systemPrompt,
+          messages,
+          temperature,
+          responseMimeType,
+          maxOutputTokens,
+          disableThinking,
+          signal,
+        });
+      } catch (err: any) {
+        if (signal?.aborted) throw err;
+        const status = err?.status;
+        if (attempt === 0 && (status === 429 || status === 503)) {
+          await new Promise((r) => setTimeout(r, 900));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
   const candidateModels = [
     preferredModel,
     ...GEMINI_FREE_TIER_FALLBACK_CHAIN.filter((m) => m !== preferredModel),
@@ -298,8 +351,12 @@ export async function callLlmAssistant(params: {
         messages,
         temperature,
         responseMimeType,
+        maxOutputTokens,
+        disableThinking,
+        signal,
       });
     } catch (err: any) {
+      if (signal?.aborted) throw err;
       lastError = err;
       const status = err?.status;
       if (status === 404 || status === 429 || status === 503) {
@@ -313,137 +370,281 @@ export async function callLlmAssistant(params: {
 }
 
 /**
- * Deep AI Study Content Extractor:
- * Sends raw extracted pages in small batches to Gemini (`responseMimeType: 'application/json'`)
- * and reconstructs ONLY the clean study content (headings, paragraphs, exam alerts, question items)
- * exactly like the clean Demo experience — completely discarding logos, headers, footers,
- * cover pages, sumário/table of contents, student CPF/watermarks, and marketing/institutional noise.
+ * Classifies numbered lines of a batch of PDF pages using ultra-compact JSON tuples:
+ * `{"k":[[startLineIdx, endLineIdx, "h|n|a|q"], ...]}` (~20x smaller output than rewriting text!).
+ */
+export async function classifyStudyLinesBatchWithGemini(params: {
+  batchPages: ExtractedRawPage[];
+  config: ProviderConfig;
+  signal?: AbortSignal;
+}): Promise<AiExtractedStudyBlock[]> {
+  const { batchPages, config, signal } = params;
+
+  let lineCounter = 0;
+  const formattedSections: string[] = [];
+
+  for (const page of batchPages) {
+    if (page.lines.length === 0) continue;
+    const pageLinesFormatted: string[] = [`=== PÁG ${page.pageNumber} ===`];
+    for (const line of page.lines) {
+      pageLinesFormatted.push(`${lineCounter}| ${line.text}`);
+      lineCounter++;
+    }
+    formattedSections.push(pageLinesFormatted.join('\n'));
+  }
+
+  if (lineCounter === 0) {
+    return [];
+  }
+
+  const numberedPromptPayload = formattedSections.join('\n').slice(0, 28000);
+
+  const rawJson = await callLlmAssistant({
+    config,
+    temperature: 0,
+    maxOutputTokens: 1024,
+    disableThinking: true,
+    allowModelFallback: false,
+    responseMimeType: 'application/json',
+    signal,
+    systemPrompt: `Você é um classificador cirúrgico ultrarrápido de linhas de PDFs de estudo.
+Você receberá linhas numeradas "ID| texto" de páginas de uma apostila.
+Sua tarefa é indicar APENAS os intervalos de IDs de linhas [inicio, fim, tipo] que contêm CONTEÚDO REAL DE ESTUDO.
+
+DESCARTE 100% (NÃO inclua nos intervalos):
+- Capas, contracapas, ISBN, direitos autorais e expediente.
+- Sumários/índices com pontilhados ou listas de páginas.
+- Logos, nomes de cursinhos (Estratégia, Gran Cursos, Direção, etc.), cabeçalhos, rodapés, nomes de professores soltos no topo/rodapé, datas e "Página X de Y".
+- Marcas d'água de aluno (CPF, RG, nome + e-mail, "Licenciado para", "Proibida a reprodução").
+- Propagandas, links de redes sociais (Instagram, YouTube, Telegram) e avisos administrativos.
+
+MANTENHA E CLASSIFIQUE APENAS O CONTEÚDO DE ESTUDO usando estes códigos de 1 letra para "tipo":
+- "h": Título de capítulo, seção ou tópico de estudo.
+- "n": Parágrafo explicativo, teoria, doutrina ou artigo de lei (agrupe linhas consecutivas do mesmo parágrafo ou seção em um único intervalo [inicio, fim, "n"]).
+- "a": Jurisprudência (STF/STJ), súmula, atenção, pegadinha de banca, exceção importante ou dica de prova.
+- "q": Questão de concurso, alternativas ou gabarito comentado.
+
+Retorne EXCLUSIVAMENTE um JSON compacto no formato:
+{"k":[[2,2,"h"],[3,18,"n"],[19,23,"a"]]}
+Se nenhuma linha for conteúdo de estudo (ex: página de capa ou sumário), retorne {"k":[]}.`,
+    history: [],
+    userQuestion: numberedPromptPayload,
+  });
+
+  const jsonMatch = rawJson.match(/\{[\s\S]*\}/);
+  const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawJson) as {
+    k?: ClassifiedLineRangeTuple[];
+    ranges?: ClassifiedLineRangeTuple[];
+  };
+
+  const tuples = Array.isArray(parsed?.k)
+    ? parsed.k
+    : Array.isArray(parsed?.ranges)
+      ? parsed.ranges
+      : [];
+
+  return buildBlocksFromLineRanges(batchPages, tuples);
+}
+
+/**
+ * Fast Parallel & Progressive Deep AI Study Content Extractor:
+ * - Reuses cached pages (`cachedPageBlocks`) immediately without calling the API.
+ * - Classifies uncached pages in batches of 4 with up to 3 parallel requests (`MAX_CONCURRENCY = 3`).
+ * - Emits `onBatchReady(blocks, pageNumbers, isFirstContiguousBatch)` strictly in ascending page order
+ *   so the reader opens in ~2-3s on the first batch and progressively appends subsequent pages!
+ * - Falls back per-batch to `heuristicBlocksForPages` if rate-limited (429), never hanging or cascading models.
  */
 export async function extractCleanStudyBlocksWithGemini(params: {
   rawPages: ExtractedRawPage[];
   config: ProviderConfig;
+  cachedPageBlocks?: Map<number, AiExtractedStudyBlock[]>;
+  signal?: AbortSignal;
   onProgress?: (processedPages: number, totalPages: number) => void;
-}): Promise<{ blocks: AiExtractedStudyBlock[]; discardedPagesCount: number }> {
-  const { rawPages, config, onProgress } = params;
-  const apiKey = config.apiKeys.gemini?.trim();
-  if (!apiKey || rawPages.length === 0) {
-    return { blocks: [], discardedPagesCount: 0 };
+  onBatchReady?: (
+    batchBlocks: AiExtractedStudyBlock[],
+    completedPageNumbers: number[],
+    isFirstBatch: boolean
+  ) => void;
+}): Promise<{
+  blocks: AiExtractedStudyBlock[];
+  pageBlocksMap: Map<number, AiExtractedStudyBlock[]>;
+  discardedPagesCount: number;
+}> {
+  const {
+    rawPages,
+    config,
+    cachedPageBlocks,
+    signal,
+    onProgress,
+    onBatchReady,
+  } = params;
+  const totalPages = rawPages.length;
+  const pageBlocksMap = new Map<number, AiExtractedStudyBlock[]>();
+
+  if (totalPages === 0) {
+    return { blocks: [], pageBlocksMap, discardedPagesCount: 0 };
   }
 
-  const PAGES_PER_BATCH = 3;
-  const allBlocks: AiExtractedStudyBlock[] = [];
-  const pagesWithStudyContent = new Set<number>();
-  let processedPages = 0;
+  const repetitiveFingerprints = detectRepetitiveHeaderFooterFingerprints(
+    rawPages.map((p) => p.lines),
+    true
+  );
 
+  const apiKey = config.apiKeys.gemini?.trim();
+  const PAGES_PER_BATCH = 4;
+  const MAX_CONCURRENCY = 3;
+
+  interface BatchTask {
+    batchIndex: number;
+    pages: ExtractedRawPage[];
+    fromCacheOnly: boolean;
+  }
+
+  const batches: BatchTask[] = [];
   for (let i = 0; i < rawPages.length; i += PAGES_PER_BATCH) {
-    const batch = rawPages.slice(i, i + PAGES_PER_BATCH);
-    const pagesPayload = batch
-      .map((p) => ({
-        pageNumber: p.pageNumber,
-        rawText: p.lines.map((l) => l.text).join('\n').slice(0, 12000),
-      }))
-      .filter((p) => p.rawText.trim().length > 15);
+    const slice = rawPages.slice(i, i + PAGES_PER_BATCH);
+    const allInCache =
+      Boolean(cachedPageBlocks) &&
+      slice.every((p) => cachedPageBlocks!.has(p.pageNumber));
+    batches.push({
+      batchIndex: batches.length,
+      pages: slice,
+      fromCacheOnly: allInCache,
+    });
+  }
 
-    if (pagesPayload.length > 0) {
-      try {
-        const rawJson = await callLlmAssistant({
-          config,
-          temperature: 0.15,
-          responseMimeType: 'application/json',
-          systemPrompt: `Você é um extrator cirúrgico de conteúdo didático de PDFs para estudo e leitura em voz alta.
-Sua missão é transformar o texto bruto das páginas do PDF em blocos de estudo 100% limpos (igual a uma apostila enxuta de leitura), mantendo APENAS o conteúdo real de estudo e descartando TODO o resto.
+  const completedBatchResults = new Map<
+    number,
+    { blocks: AiExtractedStudyBlock[]; pageNums: number[] }
+  >();
+  let nextBatchToEmit = 0;
+  let hasEmittedFirstWithContent = false;
+  let completedPagesCount = 0;
 
-REGRAS OBRIGATÓRIAS DE EXCLUSÃO (REMOVA 100%):
-1. REMOVA capas, contracapas, fichas catalográficas, ISBN, direitos autorais e expediente.
-2. REMOVA sumários / índices com linhas pontilhadas ou listas de páginas.
-3. REMOVA logos, nomes de cursinhos (Estratégia, Gran Cursos, Direção, Alfacon, etc.), cabeçalhos e rodapés repetitivos, nomes de professores soltos no topo/rodapé, datas e numeração de página ("Página X de Y", "Aula 01", etc.).
-4. REMOVA marcas d'água de alunos (CPF, RG, nome completo + e-mail, "Licenciado para...", "Proibida a reprodução").
-5. REMOVA propagandas, links de redes sociais (Instagram, YouTube, Telegram), QR codes e avisos administrativos.
+  const tryEmitContiguousBatches = () => {
+    while (completedBatchResults.has(nextBatchToEmit)) {
+      const ready = completedBatchResults.get(nextBatchToEmit)!;
+      completedBatchResults.delete(nextBatchToEmit);
+      nextBatchToEmit++;
 
-REGRAS DE EXTRAÇÃO E FORMATAÇÃO DO CONTEÚDO DE ESTUDO:
-- Una linhas quebradas artificialmente pelo PDF em parágrafos e frases completas, naturais e prontas para leitura em voz alta.
-- Preserve fielmente a matéria de estudo: explicações teóricas, artigos de lei, jurisprudência, exemplos práticos, esquemas em texto, dicas de banca e questões de prova.
-- Classifique cada bloco extraído em um dos 4 tipos ("type"):
-  - "heading": Título de capítulo, seção ou tópico de estudo (ex: "1. Princípios da Administração Pública", "2.1. Poder de Polícia").
-  - "normal": Parágrafo explicativo, doutrina, artigo de lei ou conceito teórico.
-  - "alert": Jurisprudência (STF/STJ), súmula, atenção, pegadinha de banca, exceção importante ou dica de prova.
-  - "question_item": Enunciado de questão de concurso, itens de julgar (Certo/Errado), alternativas ou comentário de gabarito.
-- Se uma página inteira for apenas capa, sumário ou propaganda sem conteúdo de estudo real, NÃO gere blocos para ela.
-
-Retorne EXCLUSIVAMENTE um JSON válido no formato:
-{
-  "blocks": [
-    {
-      "pageNumber": 1,
-      "type": "heading",
-      "topicTitle": "1. Título do Tópico",
-      "text": "1. Título do Tópico"
-    },
-    {
-      "pageNumber": 1,
-      "type": "normal",
-      "topicTitle": "1. Título do Tópico",
-      "text": "Texto limpo e fluido do parágrafo de estudo..."
+      const isFirst = !hasEmittedFirstWithContent && ready.blocks.length > 0;
+      if (isFirst) {
+        hasEmittedFirstWithContent = true;
+      }
+      onBatchReady?.(ready.blocks, ready.pageNums, isFirst);
     }
-  ]
-}`,
-          history: [],
-          userQuestion: JSON.stringify({ pages: pagesPayload }),
-        });
+  };
 
-        const jsonMatch = rawJson.match(/\{[\s\S]*\}/);
-        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawJson) as {
-          blocks?: Array<{
-            pageNumber?: number;
-            type?: string;
-            topicTitle?: string;
-            text?: string;
-          }>;
-        };
+  let cursor = 0;
+  const runWorker = async () => {
+    while (cursor < batches.length) {
+      if (signal?.aborted) return;
+      const currentTask = batches[cursor++];
+      const batchPageNums = currentTask.pages.map((p) => p.pageNumber);
+      let batchBlocks: AiExtractedStudyBlock[] = [];
 
-        if (Array.isArray(parsed?.blocks)) {
-          for (const item of parsed.blocks) {
-            const text = (item?.text || '').replace(/\s+/g, ' ').trim();
-            if (text.length < 3) continue;
-            const pageNumber =
-              typeof item.pageNumber === 'number'
-                ? item.pageNumber
-                : pagesPayload[0].pageNumber;
-            const validType =
-              item.type === 'heading' ||
-              item.type === 'alert' ||
-              item.type === 'question_item'
-                ? item.type
-                : 'normal';
-
-            pagesWithStudyContent.add(pageNumber);
-            allBlocks.push({
-              pageNumber,
-              blockType: validType,
-              topicTitle: item.topicTitle?.trim(),
-              text,
-            });
+      if (currentTask.fromCacheOnly && cachedPageBlocks) {
+        for (const p of currentTask.pages) {
+          const cached = cachedPageBlocks.get(p.pageNumber) || [];
+          batchBlocks.push(...cached);
+          pageBlocksMap.set(p.pageNumber, cached);
+        }
+      } else {
+        // Split pages in this batch between already-cached and uncached
+        const uncachedPages: ExtractedRawPage[] = [];
+        for (const p of currentTask.pages) {
+          if (cachedPageBlocks?.has(p.pageNumber)) {
+            const cached = cachedPageBlocks.get(p.pageNumber) || [];
+            pageBlocksMap.set(p.pageNumber, cached);
+          } else {
+            uncachedPages.push(p);
           }
         }
-      } catch (err) {
-        console.warn('Aviso na extração profunda Gemini para lote de páginas:', err);
+
+        if (uncachedPages.length > 0) {
+          if (apiKey) {
+            try {
+              const classified = await classifyStudyLinesBatchWithGemini({
+                batchPages: uncachedPages,
+                config,
+                signal,
+              });
+              for (const p of uncachedPages) {
+                const forPage = classified.filter(
+                  (b) => b.pageNumber === p.pageNumber
+                );
+                pageBlocksMap.set(p.pageNumber, forPage);
+              }
+            } catch (err) {
+              if (signal?.aborted) return;
+              console.warn(
+                'Fallback heurístico instantâneo aplicado ao lote de páginas:',
+                err
+              );
+              const fallback = heuristicBlocksForPages(
+                uncachedPages,
+                repetitiveFingerprints
+              );
+              for (const p of uncachedPages) {
+                const forPage = fallback.filter(
+                  (b) => b.pageNumber === p.pageNumber
+                );
+                pageBlocksMap.set(p.pageNumber, forPage);
+              }
+            }
+          } else {
+            const fallback = heuristicBlocksForPages(
+              uncachedPages,
+              repetitiveFingerprints
+            );
+            for (const p of uncachedPages) {
+              const forPage = fallback.filter(
+                (b) => b.pageNumber === p.pageNumber
+              );
+              pageBlocksMap.set(p.pageNumber, forPage);
+            }
+          }
+        }
+
+        // Collect batchBlocks in ascending page order
+        for (const p of currentTask.pages) {
+          batchBlocks.push(...(pageBlocksMap.get(p.pageNumber) || []));
+        }
       }
-    }
 
-    processedPages = Math.min(rawPages.length, i + batch.length);
-    if (onProgress) {
-      onProgress(processedPages, rawPages.length);
-    }
-  }
+      completedPagesCount = Math.min(
+        totalPages,
+        completedPagesCount + currentTask.pages.length
+      );
+      onProgress?.(completedPagesCount, totalPages);
 
-  const discardedPagesCount = Math.max(
-    0,
-    rawPages.length - pagesWithStudyContent.size
+      completedBatchResults.set(currentTask.batchIndex, {
+        blocks: batchBlocks,
+        pageNums: batchPageNums,
+      });
+      tryEmitContiguousBatches();
+    }
+  };
+
+  const workers = Array.from(
+    { length: Math.min(MAX_CONCURRENCY, batches.length) },
+    () => runWorker()
   );
+  await Promise.all(workers);
+  tryEmitContiguousBatches();
+
+  const allBlocks: AiExtractedStudyBlock[] = [];
+  let pagesWithContent = 0;
+  for (const p of rawPages) {
+    const pBlocks = pageBlocksMap.get(p.pageNumber) || [];
+    if (pBlocks.length > 0) pagesWithContent++;
+    allBlocks.push(...pBlocks);
+  }
 
   return {
     blocks: allBlocks,
-    discardedPagesCount,
+    pageBlocksMap,
+    discardedPagesCount: Math.max(0, totalPages - pagesWithContent),
   };
 }
 

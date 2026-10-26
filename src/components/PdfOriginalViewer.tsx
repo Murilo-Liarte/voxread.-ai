@@ -158,9 +158,20 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
       ? availablePageNumbers[currentPageIdx + 1]
       : null;
 
-  const pageSentences = documentData.sentences.filter(
-    (s) => s.pageNumber === currentPage
+  const pageSentences = React.useMemo(
+    () => documentData.sentences.filter((s) => s.pageNumber === currentPage),
+    [documentData.sentences, currentPage]
   );
+
+  const groupedPageParagraphs = React.useMemo(() => {
+    const pIndices = Array.from(
+      new Set(pageSentences.map((s) => s.paragraphIndex))
+    );
+    return pIndices.map((pIdx) => ({
+      pIdx,
+      sents: pageSentences.filter((s) => s.paragraphIndex === pIdx),
+    }));
+  }, [pageSentences]);
 
   const activeBoxes =
     currentSentence && currentSentence.pageNumber === currentPage
@@ -379,20 +390,17 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
               </span>
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
                 <Sparkles className="w-3 h-3 text-emerald-600" />
-                {documentData.aiCleaned
-                  ? 'Apenas Conteúdo de Estudo (Limpo por Gemini IA)'
-                  : 'Logos, Cabeçalhos e Rodapés Removidos'}
+                {documentData.pendingPages && documentData.pendingPages.length > 0
+                  ? `Limpando +${documentData.pendingPages.length} págs. em 2º plano...`
+                  : documentData.aiCleaned
+                    ? 'Apenas Conteúdo de Estudo (Limpo por Gemini IA)'
+                    : 'Logos, Cabeçalhos e Rodapés Removidos'}
               </span>
             </div>
 
             {/* Clean Study Sentences with Word-by-Word Highlight */}
             <div className="space-y-4 font-serif text-[15px] sm:text-[16.5px] leading-[1.85] text-slate-800">
-              {Array.from(
-                new Set(pageSentences.map((s) => s.paragraphIndex))
-              ).map((pIdx) => {
-                const sents = pageSentences.filter(
-                  (s) => s.paragraphIndex === pIdx
-                );
+              {groupedPageParagraphs.map(({ pIdx, sents }) => {
                 const firstSent = sents[0];
                 const isHeading = firstSent?.blockType === 'heading';
                 const isAlert = sents.some((s) => s.blockType === 'alert');

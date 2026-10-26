@@ -10,6 +10,7 @@ import { FocusedReaderView } from './components/FocusedReaderView';
 import { VoiceControlBar } from './components/VoiceControlBar';
 import { AssistantSidebar } from './components/AssistantSidebar';
 import {
+  appendCleanStudyBlocksToDocument,
   buildCleanStudyDocumentFromAiBlocks,
   createDemoDocument,
   extractRawPagesForRange,
@@ -32,8 +33,10 @@ import {
   syncSettingsToActiveAccount,
 } from './services/authService';
 import {
+  computePdfFingerprint,
   deleteDocumentFromLibrary,
   loadActiveDocument,
+  loadCachedCleanPages,
   loadConversationHistory,
   loadFlashcards,
   loadLibraryDocumentById,
@@ -42,6 +45,7 @@ import {
   loadStudyStats,
   loadUserPdfLibrary,
   loadVoiceSettings,
+  saveCachedCleanPages,
   saveConversationHistory,
   saveDocumentToUserLibrary,
   saveFlashcards,
@@ -52,6 +56,7 @@ import {
   updateDocumentReadingProgress,
 } from './services/storageService';
 import type {
+  AiExtractedStudyBlock,
   ConversationMessage,
   EngineStatus,
   FlashcardItem,
@@ -134,6 +139,8 @@ export const App: React.FC = () => {
   const activeAccountRef = useRef<UserAccount | null>(activeAccount);
   const messagesRef = useRef<ConversationMessage[]>(messages);
   const flashcardsRef = useRef<FlashcardItem[]>(flashcards);
+  const extractionAbortRef = useRef<AbortController | null>(null);
+  const waitingForNextBatchRef = useRef<number | null>(null);
 
   useEffect(() => {
     docRef.current = documentData;
@@ -467,6 +474,14 @@ export const App: React.FC = () => {
           const currentDoc = docRef.current;
 
           if (nextIdx >= currentDoc.sentences.length) {
+            if (currentDoc.pendingPages && currentDoc.pendingPages.length > 0) {
+              waitingForNextBatchRef.current = nextIdx;
+              setReaderState('paused');
+              setCleanNoticeBanner(
+                '⏳ Aguardando próximas páginas terminarem de limpar em segundo plano...'
+              );
+              return;
+            }
             setReaderState('idle');
             handleGenerateSummary();
             return;
@@ -777,7 +792,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Step 2 of PDF Upload: Extract ONLY the selected page range and run Deep Gemini Study Content Extraction
+  // Step 2 of PDF Upload: Extract ONLY the selected page range with Page Cache + Progressive Parallel Gemini Classification
   const handleConfirmPdfPageRange = async (
     startPage: number,
     endPage: number,
@@ -787,74 +802,204 @@ export const App: React.FC = () => {
     const { file, buffer, totalPages: originalTotalPages } = pendingPdfUpload;
     const rangeCount = Math.max(1, endPage - startPage + 1);
 
+    // Cancel any previous background PDF extraction
+    extractionAbortRef.current?.abort();
+    const abortController = new AbortController();
+    extractionAbortRef.current = abortController;
+    waitingForNextBatchRef.current = null;
+
     try {
       setIsLoadingPdf(true);
       setIsAiCleaningPdf(true);
       setExtractionProcessedPages(0);
       setExtractionTotalPages(rangeCount);
       setExtractionProgressText(
-        `Lendo páginas ${startPage} a ${endPage} do PDF...`
+        `Extraindo texto das páginas ${startPage} a ${endPage}...`
       );
 
-      let finalDoc: PDFDocumentData | null = null;
       const hasGeminiKey = Boolean(
         providerConfigRef.current.apiKeys.gemini?.trim()
       );
 
       if (useDeepAi && hasGeminiKey) {
-        const { rawPages } = await extractRawPagesForRange(
-          buffer,
-          startPage,
-          endPage
+        const [pdfFingerprint, { rawPages }] = await Promise.all([
+          computePdfFingerprint(buffer),
+          extractRawPagesForRange(buffer, startPage, endPage),
+        ]);
+
+        const allPageNums = rawPages.map((p) => p.pageNumber);
+        const cachedPageBlocks = await loadCachedCleanPages(
+          pdfFingerprint,
+          allPageNums
         );
 
         setExtractionProgressText(
-          `Gemini IA extraindo apenas o conteúdo de estudo (págs. ${startPage} a ${endPage})...`
+          cachedPageBlocks.size > 0
+            ? `Recuperando ${cachedPageBlocks.size} págs. do cache e classificando primeiras páginas...`
+            : `Preparando primeiras páginas (${startPage} a ${Math.min(
+                endPage,
+                startPage + 3
+              )}) com Gemini IA...`
         );
 
-        const { blocks } = await extractCleanStudyBlocksWithGemini({
-          rawPages,
-          config: providerConfigRef.current,
-          onProgress: (done, total) => {
-            setExtractionProcessedPages(done);
-            setExtractionTotalPages(total);
-            setExtractionProgressText(
-              `Gemini IA limpando logos, capas e rodapés (${done}/${total} págs.)...`
-            );
-          },
-        });
+        let openedWorkspaceWithFirstBatch = false;
+        const completedSet = new Set<number>();
 
-        if (blocks.length > 0) {
-          finalDoc = buildCleanStudyDocumentFromAiBlocks({
-            fileName: file.name,
-            fileSize: file.size,
-            pdfBytes: buffer,
-            originalTotalPages,
-            startPage,
-            endPage,
+        const { blocks, pageBlocksMap } =
+          await extractCleanStudyBlocksWithGemini({
             rawPages,
-            blocks,
+            config: providerConfigRef.current,
+            cachedPageBlocks,
+            signal: abortController.signal,
+            onProgress: (done, total) => {
+              setExtractionProcessedPages(done);
+              setExtractionTotalPages(total);
+              if (!openedWorkspaceWithFirstBatch) {
+                setExtractionProgressText(
+                  `Classificando linhas de estudo (${done}/${total} págs.)...`
+                );
+              }
+            },
+            onBatchReady: (batchBlocks, completedPageNumbers) => {
+              if (abortController.signal.aborted) return;
+
+              // Persist newly classified pages into IndexedDB cache immediately
+              const batchCacheMap = new Map<number, AiExtractedStudyBlock[]>();
+              for (const pNum of completedPageNumbers) {
+                completedSet.add(pNum);
+                batchCacheMap.set(
+                  pNum,
+                  batchBlocks.filter((b) => b.pageNumber === pNum)
+                );
+              }
+              saveCachedCleanPages(pdfFingerprint, batchCacheMap).catch(
+                () => {}
+              );
+
+              const remainingPending = allPageNums.filter(
+                (p) => !completedSet.has(p)
+              );
+
+              if (!openedWorkspaceWithFirstBatch && batchBlocks.length > 0) {
+                openedWorkspaceWithFirstBatch = true;
+                const initialDoc = buildCleanStudyDocumentFromAiBlocks({
+                  fileName: file.name,
+                  fileSize: file.size,
+                  pdfBytes: buffer,
+                  originalTotalPages,
+                  startPage,
+                  endPage,
+                  rawPages,
+                  blocks: batchBlocks,
+                  pdfFingerprint,
+                  pendingPages: remainingPending,
+                });
+
+                setDocumentData(initialDoc);
+                docRef.current = initialDoc;
+                setCurrentSentenceIndex(0);
+                sentenceIdxRef.current = 0;
+                setWordProgressRatio(0);
+                setMessages([]);
+                setFlashcards([]);
+                setSchematicSummary(null);
+                // Close the modal immediately so the user can start reading right away!
+                setPendingPdfUpload(null);
+                setIsLoadingPdf(false);
+
+                saveConversationHistory(initialDoc.id, []).catch(() => {});
+                saveFlashcards(initialDoc.id, []).catch(() => {});
+                saveSchematicSummary(initialDoc.id, null).catch(() => {});
+
+                if (remainingPending.length > 0) {
+                  setCleanNoticeBanner(
+                    `⚡ Primeiras páginas prontas! Limpando páginas ${
+                      remainingPending[0]
+                    } a ${
+                      remainingPending[remainingPending.length - 1]
+                    } em segundo plano...`
+                  );
+                }
+              } else if (openedWorkspaceWithFirstBatch) {
+                const updatedDoc = appendCleanStudyBlocksToDocument({
+                  doc: docRef.current,
+                  newBlocks: batchBlocks,
+                  rawPages,
+                  completedPages: completedPageNumbers,
+                });
+                docRef.current = updatedDoc;
+                setDocumentData(updatedDoc);
+
+                // If audio reached the end of the previous batch and was waiting, auto-resume!
+                if (
+                  waitingForNextBatchRef.current !== null &&
+                  waitingForNextBatchRef.current < updatedDoc.sentences.length
+                ) {
+                  const resumeIdx = waitingForNextBatchRef.current;
+                  waitingForNextBatchRef.current = null;
+                  speakSentenceAtIndex(resumeIdx);
+                }
+              }
+            },
           });
+
+        if (abortController.signal.aborted) return;
+
+        // Save all extracted pages to cache
+        await saveCachedCleanPages(pdfFingerprint, pageBlocksMap);
+
+        let finalDoc: PDFDocumentData | null = openedWorkspaceWithFirstBatch
+          ? {
+              ...docRef.current,
+              pendingPages: undefined,
+            }
+          : blocks.length > 0
+            ? buildCleanStudyDocumentFromAiBlocks({
+                fileName: file.name,
+                fileSize: file.size,
+                pdfBytes: buffer,
+                originalTotalPages,
+                startPage,
+                endPage,
+                rawPages,
+                blocks,
+                pdfFingerprint,
+              })
+            : null;
+
+        if (finalDoc) {
+          docRef.current = finalDoc;
+          setDocumentData(finalDoc);
+          setPendingPdfUpload(null);
+
+          const nextLib = await saveDocumentToUserLibrary(
+            finalDoc,
+            activeAccountRef.current?.username
+          );
+          setPdfLibrary(nextLib);
+
+          setCleanNoticeBanner(
+            `✨ Páginas ${startPage} a ${endPage} prontas (${finalDoc.sentences.length} frases em ${finalDoc.topics.length} tópicos) — salvas em cache para abertura instantânea!`
+          );
+          return;
         }
       }
 
       // Fallback if no Gemini API key or if AI returned 0 blocks
-      if (!finalDoc) {
-        setExtractionProgressText(
-          `Processando páginas ${startPage} a ${endPage} com filtro de cabeçalhos e rodapés...`
-        );
-        finalDoc = await parsePdfArrayBuffer(
-          buffer,
-          file.name,
-          file.size,
-          true,
-          startPage,
-          endPage
-        );
-      }
+      setExtractionProgressText(
+        `Processando páginas ${startPage} a ${endPage} com filtro rápido local...`
+      );
+      const fallbackDoc = await parsePdfArrayBuffer(
+        buffer,
+        file.name,
+        file.size,
+        true,
+        startPage,
+        endPage
+      );
 
-      setDocumentData(finalDoc);
-      docRef.current = finalDoc;
+      setDocumentData(fallbackDoc);
+      docRef.current = fallbackDoc;
       setCurrentSentenceIndex(0);
       sentenceIdxRef.current = 0;
       setWordProgressRatio(0);
@@ -864,30 +1009,31 @@ export const App: React.FC = () => {
       setPendingPdfUpload(null);
 
       const nextLib = await saveDocumentToUserLibrary(
-        finalDoc,
+        fallbackDoc,
         activeAccountRef.current?.username
       );
       setPdfLibrary(nextLib);
 
-      await saveConversationHistory(finalDoc.id, []);
-      await saveFlashcards(finalDoc.id, []);
-      await saveSchematicSummary(finalDoc.id, null);
+      await saveConversationHistory(fallbackDoc.id, []);
+      await saveFlashcards(fallbackDoc.id, []);
+      await saveSchematicSummary(fallbackDoc.id, null);
 
       setCleanNoticeBanner(
-        finalDoc.aiCleaned
-          ? `✨ Páginas ${startPage} a ${endPage} extraídas com Gemini IA: apenas o texto puro de estudo (${finalDoc.sentences.length} frases em ${finalDoc.topics.length} tópicos) está destacado para leitura!`
-          : `🧹 Páginas ${startPage} a ${endPage} carregadas (${finalDoc.removedNoiseCount || 0} cabeçalhos/rodapés removidos).`
+        `🧹 Páginas ${startPage} a ${endPage} carregadas (${fallbackDoc.removedNoiseCount || 0} cabeçalhos/rodapés removidos).`
       );
     } catch (err: any) {
+      if (abortController.signal.aborted) return;
       setErrorBanner(
         `Erro ao processar páginas ${startPage} a ${endPage} de "${file.name}": ${
           err?.message || 'Falha na extração.'
         }`
       );
     } finally {
-      setIsLoadingPdf(false);
-      setIsAiCleaningPdf(false);
-      setExtractionProgressText('');
+      if (!abortController.signal.aborted) {
+        setIsLoadingPdf(false);
+        setIsAiCleaningPdf(false);
+        setExtractionProgressText('');
+      }
     }
   };
 

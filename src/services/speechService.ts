@@ -118,8 +118,12 @@ class SpeechService {
   private playbackToken = 0;
   private activeAudio: HTMLAudioElement | null = null;
   private progressTimer: any = null;
+  private prefetchTimer: any = null;
   private recognition: any = null;
   private isListening = false;
+
+  // Serializes WASM/ONNX session.predict() calls so speak() and prefetch() never collide or freeze the main thread
+  private inferenceMutex: Promise<any> = Promise.resolve();
 
   // Lookahead LRU Audio Cache (maps "piper:voice:text" -> Promise<Blob>)
   private audioBlobCache = new Map<string, Promise<Blob>>();
@@ -163,6 +167,10 @@ class SpeechService {
     if (this.progressTimer) {
       clearInterval(this.progressTimer);
       this.progressTimer = null;
+    }
+    if (this.prefetchTimer) {
+      clearTimeout(this.prefetchTimer);
+      this.prefetchTimer = null;
     }
   }
 
@@ -317,16 +325,20 @@ class SpeechService {
   }
 
   /**
-   * Automatically warms up the Piper Neural session in the background as soon as the site opens.
-   * When cached in OPFS, this loads from local disk in < 300ms with 0 network bytes!
+   * Automatically warms up the Piper Neural session in the background ONLY if it is already cached locally,
+   * scheduled after initial UI mount so it never blocks startup or competes with PDF uploads.
    */
   public async warmUpPiperOnStartup(
     voiceId: PiperVoiceId = 'pt_BR-faber-medium'
   ): Promise<void> {
     try {
-      await this.getPiperSession(voiceId, true);
-    } catch (err) {
-      console.warn('Aquecimento automático do Piper em background:', err);
+      const cached = await this.isPiperVoiceCachedLocally(voiceId);
+      if (!cached) return;
+      setTimeout(() => {
+        this.getPiperSession(voiceId, true).catch(() => {});
+      }, 900);
+    } catch {
+      // Ignore background warm-up errors
     }
   }
 
@@ -339,8 +351,8 @@ class SpeechService {
   }
 
   /**
-   * Pre-generates the audio Blob for the upcoming sentence in the background
-   * so there is zero delay when transitioning from Sentence N to Sentence N+1!
+   * Pre-generates the audio Blob for the upcoming sentence in the background after a 320ms delay
+   * so smooth scrolling and UI animations complete at 60fps before WASM inference runs.
    */
   public prefetch(
     text: string,
@@ -355,16 +367,27 @@ class SpeechService {
     const key = this.getCacheKey(formatted, blockType, settings);
     if (this.audioBlobCache.has(key)) return;
 
-    if (this.audioBlobCache.size >= 25) {
-      const oldestKey = this.audioBlobCache.keys().next().value;
-      if (oldestKey) this.audioBlobCache.delete(oldestKey);
+    if (this.prefetchTimer) {
+      clearTimeout(this.prefetchTimer);
     }
 
-    const blobPromise = this.synthesizeNeuralBlob(formatted, blockType, settings);
-    blobPromise.catch(() => {
-      this.audioBlobCache.delete(key);
-    });
-    this.audioBlobCache.set(key, blobPromise);
+    const expectedToken = this.playbackToken;
+    this.prefetchTimer = setTimeout(() => {
+      this.prefetchTimer = null;
+      if (expectedToken !== this.playbackToken) return;
+      if (this.audioBlobCache.has(key)) return;
+
+      if (this.audioBlobCache.size >= 25) {
+        const oldestKey = this.audioBlobCache.keys().next().value;
+        if (oldestKey) this.audioBlobCache.delete(oldestKey);
+      }
+
+      const blobPromise = this.synthesizeNeuralBlob(formatted, blockType, settings);
+      blobPromise.catch(() => {
+        this.audioBlobCache.delete(key);
+      });
+      this.audioBlobCache.set(key, blobPromise);
+    }, 320);
   }
 
   private getOrSynthesizeBlob(
@@ -510,9 +533,17 @@ class SpeechService {
     text: string,
     voiceId: PiperVoiceId
   ): Promise<Blob> {
-    const session = await this.getPiperSession(voiceId);
-    const wavBlob: Blob = await session.predict(text);
-    return wavBlob;
+    const runInference = async (): Promise<Blob> => {
+      // Yield 1 frame to the browser before running Emscripten + ONNX WASM inference
+      await new Promise((r) => setTimeout(r, 12));
+      const session = await this.getPiperSession(voiceId);
+      const wavBlob: Blob = await session.predict(text);
+      return wavBlob;
+    };
+
+    const nextInQueue = this.inferenceMutex.then(runInference, runInference);
+    this.inferenceMutex = nextInQueue.catch(() => {});
+    return nextInQueue;
   }
 
   /**
@@ -578,19 +609,28 @@ class SpeechService {
         onStart?.();
         onWordProgress?.(0, 0);
 
-        this.clearProgressTimer();
+        let lastEmittedRatio = 0;
+        if (this.progressTimer) {
+          clearInterval(this.progressTimer);
+        }
         this.progressTimer = setInterval(() => {
           if (token !== this.playbackToken || !this.activeAudio) {
-            this.clearProgressTimer();
+            if (this.progressTimer) {
+              clearInterval(this.progressTimer);
+              this.progressTimer = null;
+            }
             return;
           }
           const duration = audio.duration;
           if (duration && Number.isFinite(duration) && duration > 0) {
             const ratio = Math.min(1, Math.max(0, audio.currentTime / duration));
-            const approxChar = Math.floor(ratio * text.length);
-            onWordProgress?.(approxChar, ratio);
+            if (Math.abs(ratio - lastEmittedRatio) >= 0.035 || ratio >= 0.98) {
+              lastEmittedRatio = ratio;
+              const approxChar = Math.floor(ratio * text.length);
+              onWordProgress?.(approxChar, ratio);
+            }
           }
-        }, 40);
+        }, 120);
       };
 
       audio.onended = () => {

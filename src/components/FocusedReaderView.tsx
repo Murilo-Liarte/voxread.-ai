@@ -1,5 +1,5 @@
-import React, { useEffect, useRef } from 'react';
-import { Sparkles, AlertTriangle, Layers } from 'lucide-react';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { Sparkles, AlertTriangle, Layers, Loader2 } from 'lucide-react';
 import type { PDFDocumentData, PDFSentence, ReaderState } from '../types';
 
 interface FocusedReaderViewProps {
@@ -35,36 +35,40 @@ export const FocusedReaderView: React.FC<FocusedReaderViewProps> = ({
   const isReading = readerState === 'reading';
   const activeSentence = documentData.sentences[currentSentenceIndex];
 
-  const pagesWithParagraphs = documentData.pages
-    .map((page) => {
-      const pageSentences = documentData.sentences.filter(
-        (s) => s.pageNumber === page.pageNumber
-      );
-      const maxParagraph = pageSentences.reduce(
-        (max, s) => Math.max(max, s.paragraphIndex),
-        0
-      );
+  // Memoize page and paragraph grouping so wordProgressRatio updates never recompute page structures
+  const pagesWithParagraphs = useMemo(() => {
+    return documentData.pages
+      .map((page) => {
+        const pageSentences = documentData.sentences.filter(
+          (s) => s.pageNumber === page.pageNumber
+        );
+        const maxParagraph = pageSentences.reduce(
+          (max, s) => Math.max(max, s.paragraphIndex),
+          0
+        );
 
-      const groupedParagraphs: PDFSentence[][] = [];
-      for (let pIdx = 0; pIdx <= maxParagraph; pIdx++) {
-        const sents = pageSentences.filter((s) => s.paragraphIndex === pIdx);
-        if (sents.length > 0) {
-          groupedParagraphs.push(sents);
+        const groupedParagraphs: PDFSentence[][] = [];
+        for (let pIdx = 0; pIdx <= maxParagraph; pIdx++) {
+          const sents = pageSentences.filter((s) => s.paragraphIndex === pIdx);
+          if (sents.length > 0) {
+            groupedParagraphs.push(sents);
+          }
         }
-      }
 
-      return {
-        pageNumber: page.pageNumber,
-        groupedParagraphs,
-      };
-    })
-    .filter((p) => p.groupedParagraphs.length > 0);
+        return {
+          pageNumber: page.pageNumber,
+          groupedParagraphs,
+        };
+      })
+      .filter((p) => p.groupedParagraphs.length > 0);
+  }, [documentData.pages, documentData.sentences]);
 
   const startRange = documentData.selectedStartPage || 1;
   const endRange = documentData.selectedEndPage || documentData.totalPages;
   const hasCustomRange =
     documentData.originalTotalPages &&
     (startRange > 1 || endRange < documentData.originalTotalPages);
+  const pendingPages = documentData.pendingPages || [];
 
   return (
     <div className="flex flex-col h-full w-full bg-slate-950 overflow-hidden relative">
@@ -188,6 +192,23 @@ export const FocusedReaderView: React.FC<FocusedReaderViewProps> = ({
             </div>
           </article>
         ))}
+
+        {/* Progressive Background Extraction Indicator */}
+        {pendingPages.length > 0 && (
+          <div className="max-w-2xl mx-auto rounded-2xl border border-indigo-500/30 bg-indigo-950/25 px-5 py-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 text-xs text-indigo-200 font-medium">
+              <Loader2 className="w-4 h-4 animate-spin text-indigo-400 shrink-0" />
+              <span>
+                Limpando próximas páginas em segundo plano (págs.{' '}
+                {pendingPages[0]} a {pendingPages[pendingPages.length - 1]})...
+                Você já pode ler normalmente!
+              </span>
+            </div>
+            <span className="text-[11px] font-mono text-emerald-300 shrink-0">
+              +{pendingPages.length} págs.
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
