@@ -8,8 +8,7 @@ import {
   AlignLeft,
   CheckCircle2,
   AlertCircle,
-  Layers,
-  Brain,
+  GraduationCap,
   User,
   FolderOpen,
 } from 'lucide-react';
@@ -28,12 +27,12 @@ interface HeaderProps {
   onOpenSettings: () => void;
   onOpenAccount: () => void;
   onOpenPdfLibrary: () => void;
-  onOpenNeuroscience: () => void;
+  onOpenNeuroscience?: () => void;
   onUploadPdf: (file: File) => void;
   isLoadingPdf: boolean;
   isAiPanelOpen: boolean;
   onToggleAiPanel: () => void;
-  badgeCount: number;
+  badgeCount?: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -49,12 +48,11 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSettings,
   onOpenAccount,
   onOpenPdfLibrary,
-  onOpenNeuroscience,
   onUploadPdf,
   isLoadingPdf,
   isAiPanelOpen,
   onToggleAiPanel,
-  badgeCount,
+  badgeCount = 0,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasApiKey = Boolean(providerConfig.apiKeys.gemini?.trim());
@@ -142,18 +140,8 @@ export const Header: React.FC<HeaderProps> = ({
         </button>
       </div>
 
-      {/* Right: Meus PDFs, Upload, Account, Gemini/Voice & Study Panel Toggle */}
+      {/* Right: Meus PDFs, Upload, Account, Gemini/Voice & Professor IA Toggle */}
       <div className="flex items-center gap-1.5 shrink-0">
-        <button
-          type="button"
-          onClick={onOpenNeuroscience}
-          className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 border border-violet-500/30 text-xs font-semibold transition-all"
-          title="A Ciência por trás do Leitor (Dupla Codificação + Active Recall)"
-        >
-          <Brain className="w-3.5 h-3.5 text-violet-400 shrink-0" />
-          <span className="hidden xl:inline">Ciência</span>
-        </button>
-
         {/* Meus PDFs em Leitura */}
         <button
           type="button"
@@ -239,13 +227,13 @@ export const Header: React.FC<HeaderProps> = ({
           onClick={onToggleAiPanel}
           className={`relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-all ${
             isAiPanelOpen
-              ? 'bg-indigo-600 text-white border-indigo-500'
+              ? 'bg-violet-600 text-white border-violet-500'
               : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
           }`}
-          title="Abrir/Fechar Painel de Flashcards, Resumo e Professor"
+          title="Abrir/Fechar Professor IA (Explicar e Tirar Dúvidas)"
         >
-          <Layers className="w-3.5 h-3.5" />
-          <span className="hidden xl:inline">Estudo</span>
+          <GraduationCap className="w-3.5 h-3.5" />
+          <span className="hidden xl:inline">Explicar / IA</span>
           {badgeCount > 0 && (
             <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-emerald-500 text-slate-950">
               {badgeCount}

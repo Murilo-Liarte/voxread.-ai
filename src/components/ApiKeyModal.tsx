@@ -399,8 +399,8 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     </div>
                     <input
                       type="range"
-                      min="0.75"
-                      max="1.8"
+                      min="0.60"
+                      max="1.50"
                       step="0.05"
                       value={draftVoice.rate}
                       onChange={(e) =>
@@ -582,21 +582,21 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={draftVoice.autoFlashcardsOnTopicEnd}
+                    checked={draftVoice.autoResumeAfterAnswer ?? true}
                     onChange={(e) =>
                       setDraftVoice((prev) => ({
                         ...prev,
-                        autoFlashcardsOnTopicEnd: e.target.checked,
+                        autoResumeAfterAnswer: e.target.checked,
                       }))
                     }
                     className="mt-1 rounded accent-indigo-500"
                   />
                   <div>
                     <span className="block text-xs font-semibold text-slate-200">
-                      Pausa Automática para Flashcards ao Fim de Cada Tópico (Active Recall)
+                      Retomar Leitura do PDF Após Explicação da IA
                     </span>
                     <span className="block text-[11px] text-slate-400">
-                      Ao concluir um tópico da apostila, pausa a leitura e lança perguntas de fixação na aba lateral.
+                      Assim que o Professor IA terminar de explicar um trecho em dúvida, volta para a leitura do texto automaticamente.
                     </span>
                   </div>
                 </label>

@@ -1,13 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import {
-  BookOpen,
   CheckCircle2,
   FileText,
-  KeyRound,
   Layers,
   Loader2,
   Sparkles,
-  Wand2,
   X,
 } from 'lucide-react';
 import { normalizePageRange } from '../services/pdfService';
@@ -17,14 +14,14 @@ interface PdfPageRangeModalProps {
   fileName: string;
   fileSize: number;
   totalPages: number;
-  hasGeminiApiKey: boolean;
+  hasGeminiApiKey?: boolean;
   isProcessing: boolean;
   progressText: string;
   processedPages: number;
   totalRangePages: number;
   onConfirmRange: (startPage: number, endPage: number, useDeepAi: boolean) => void;
   onCancel: () => void;
-  onOpenApiModal: () => void;
+  onOpenApiModal?: () => void;
 }
 
 export const PdfPageRangeModal: React.FC<PdfPageRangeModalProps> = ({
@@ -32,14 +29,12 @@ export const PdfPageRangeModal: React.FC<PdfPageRangeModalProps> = ({
   fileName,
   fileSize,
   totalPages,
-  hasGeminiApiKey,
   isProcessing,
   progressText,
   processedPages,
   totalRangePages,
   onConfirmRange,
   onCancel,
-  onOpenApiModal,
 }) => {
   const [startInput, setStartInput] = useState<string>('1');
   const [endInput, setEndInput] = useState<string>(
@@ -51,7 +46,7 @@ export const PdfPageRangeModal: React.FC<PdfPageRangeModalProps> = ({
     if (isOpen && totalPages > 0) {
       setStartInput('1');
       setEndInput(String(Math.min(totalPages, 25)));
-      setUseDeepAi(true);
+      setUseDeepAi(false);
     }
   }, [isOpen, totalPages]);
 
@@ -230,56 +225,23 @@ export const PdfPageRangeModal: React.FC<PdfPageRangeModalProps> = ({
             </div>
           </div>
 
-          {/* Deep AI Study Content Extraction Mode */}
-          <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/15 p-3.5 space-y-2.5">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-2.5">
-                <Wand2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                <div>
-                  <h4 className="text-xs font-bold text-emerald-200 flex items-center gap-1.5">
-                    Extração Cirúrgica de Conteúdo (Estilo Demo)
-                    <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-300">
-                      Gemini IA
-                    </span>
-                  </h4>
-                  <p className="text-[11px] text-slate-300 mt-0.5 leading-relaxed">
-                    A IA lê as páginas{' '}
-                    <strong className="text-white">
-                      {normalized.startPage} a {normalized.endPage}
-                    </strong>{' '}
-                    e extrai <strong>literalmente apenas o texto de estudo</strong>{' '}
-                    (títulos, teoria, jurisprudência e questões), descartando 100% de
-                    logos, capas, sumários, cabeçalhos, rodapés e CPF.
-                  </p>
-                </div>
+          {/* Instant Geometric Reading Info (Preserves Graphics/Tables + Skips Headers/Footers) */}
+          <div className="rounded-xl border border-emerald-500/25 bg-emerald-950/15 p-3.5 space-y-1.5">
+            <div className="flex items-start gap-2.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-xs font-bold text-emerald-200 flex items-center gap-1.5">
+                  Abertura Instantânea • Gráficos, Tabelas e Imagens Mantidos
+                </h4>
+                <p className="text-[11px] text-slate-300 mt-0.5 leading-relaxed">
+                  As páginas{' '}
+                  <strong className="text-white">
+                    {normalized.startPage} a {normalized.endPage}
+                  </strong>{' '}
+                  abrem imediatamente mantendo todos os gráficos, tabelas e figuras visíveis no texto, enquanto a voz pula cabeçalhos, rodapés e células numéricas automaticamente.
+                </p>
               </div>
-
-              <input
-                type="checkbox"
-                disabled={isProcessing}
-                checked={useDeepAi}
-                onChange={(e) => setUseDeepAi(e.target.checked)}
-                className="mt-1 h-4 w-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
-              />
             </div>
-
-            {!hasGeminiApiKey && useDeepAi && (
-              <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
-                <span>
-                  Configure sua chave gratuita do Google AI Studio para usar a limpeza
-                  profunda com Gemini.
-                </span>
-                <button
-                  type="button"
-                  disabled={isProcessing}
-                  onClick={onOpenApiModal}
-                  className="shrink-0 inline-flex items-center gap-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 px-2.5 py-1 text-[11px] font-semibold text-amber-100 transition"
-                >
-                  <KeyRound className="w-3 h-3" />
-                  Configurar IA
-                </button>
-              </div>
-            )}
           </div>
 
           {/* Progress Bar while Gemini extracts clean blocks */}

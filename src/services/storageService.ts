@@ -97,7 +97,7 @@ export function saveProviderConfig(config: ProviderConfig): void {
   }
 }
 
-const CURRENT_VOICE_SETTINGS_VERSION = 4;
+const CURRENT_VOICE_SETTINGS_VERSION = 5;
 
 export function createDefaultVoiceSettings(): VoiceSettings {
   return {
@@ -105,12 +105,12 @@ export function createDefaultVoiceSettings(): VoiceSettings {
     ttsEngine: 'piper_wasm',
     piperVoiceId: 'pt_BR-faber-medium',
     allowSystemVoiceFallback: false,
-    rate: 1.05,
-    pitch: 1.02,
+    rate: 0.85,
+    pitch: 1.0,
     expressiveProsody: true,
     prefetchNextSentence: true,
     autoResumeAfterAnswer: true,
-    autoFlashcardsOnTopicEnd: true,
+    autoFlashcardsOnTopicEnd: false,
     sanitizeHeadersFooters: true,
   };
 }
@@ -128,6 +128,7 @@ export function loadVoiceSettings(): VoiceSettings {
       ...parsed,
       ttsEngine: 'piper_wasm',
       piperVoiceId: parsed.piperVoiceId || defaults.piperVoiceId,
+      autoFlashcardsOnTopicEnd: false,
     };
 
     if (
@@ -135,6 +136,10 @@ export function loadVoiceSettings(): VoiceSettings {
       parsed.settingsVersion < CURRENT_VOICE_SETTINGS_VERSION
     ) {
       merged.settingsVersion = CURRENT_VOICE_SETTINGS_VERSION;
+      // Migrate old fast rate (>= 1.0) down to the calm 0.85 default
+      if (!parsed.rate || parsed.rate >= 1.0) {
+        merged.rate = 0.85;
+      }
       saveVoiceSettings(merged);
     }
 

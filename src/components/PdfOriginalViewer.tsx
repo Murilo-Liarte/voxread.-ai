@@ -11,6 +11,8 @@ import {
   Sparkles,
   Eye,
   FileCheck2,
+  MessageSquare,
+  SkipForward,
 } from 'lucide-react';
 import { loadPdfProxy } from '../services/pdfService';
 import type { PDFDocumentData, PDFSentence, ReaderState } from '../types';
@@ -24,6 +26,7 @@ interface PdfOriginalViewerProps {
   onSelectPage: (pageNumber: number) => void;
   onSelectSentence: (globalIndex: number, autoPlay?: boolean) => void;
   onUploadPdf: (file: File) => void;
+  onAskAiAboutCurrentSentence?: (promptText: string) => void;
 }
 
 export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
@@ -35,20 +38,23 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
   onSelectPage,
   onSelectSentence,
   onUploadPdf,
+  onAskAiAboutCurrentSentence,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const highlightAnchorRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [scale, setScale] = useState<number>(1.2);
+  const [scale, setScale] = useState<number>(1.25);
   const [pdfProxy, setPdfProxy] = useState<any>(null);
   const [rendering, setRendering] = useState<boolean>(false);
-  // Default to the clean Demo-style study sheet so only pure study text is shown
-  const [showRawCanvas, setShowRawCanvas] = useState<boolean>(false);
+  // Default to the real PDF page canvas whenever pdfBytes exist so 100% of graphics, tables, and images stay visible!
+  const [showRawCanvas, setShowRawCanvas] = useState<boolean>(() =>
+    Boolean(documentData.pdfBytes)
+  );
 
-  // Reset to clean Demo-style study view whenever a new document is loaded
+  // Default to original PDF canvas with graphics/tables preserved whenever a document with pdfBytes is loaded
   useEffect(() => {
-    setShowRawCanvas(false);
-  }, [documentData.id]);
+    setShowRawCanvas(Boolean(documentData.pdfBytes));
+  }, [documentData.id, Boolean(documentData.pdfBytes)]);
 
   // Load pdfjs document proxy only if the user toggles raw canvas view
   useEffect(() => {
@@ -234,14 +240,10 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
 
           <span
             className="hidden xl:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[10px] text-emerald-300 font-medium"
-            title="Exibindo apenas o conteúdo puro de estudo destacado para leitura"
+            title="Gráficos, tabelas e imagens permanecem visíveis no texto, mas a voz pula cabeçalhos, rodapés e células numéricas"
           >
             <ShieldCheck className="w-3 h-3" />
-            <span>
-              {documentData.aiCleaned
-                ? 'Extração Cirúrgica Gemini IA'
-                : 'Texto Limpo Destacado'}
-            </span>
+            <span>Gráficos/Tabelas Mantidos • Voz Pula Cabeçalhos</span>
           </span>
         </div>
 
@@ -273,32 +275,48 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
           </button>
         </div>
 
-        {/* Right Controls: Toggle Raw PDF vs Clean Demo Sheet + Zoom */}
+        {/* Right Controls: Ask AI about current excerpt + Toggle Raw PDF vs Text Sheet + Zoom */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {onAskAiAboutCurrentSentence && currentSentence && (
+            <button
+              type="button"
+              onClick={() =>
+                onAskAiAboutCurrentSentence(
+                  'Explique este trecho de forma clara, simples e detalhada para facilitar meu entendimento.'
+                )
+              }
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-violet-600 hover:bg-violet-500 text-white shadow-sm transition-colors"
+              title="Pedir para a IA explicar/detalhar o trecho atual em leitura"
+            >
+              <MessageSquare className="w-3 h-3" />
+              <span>Explicar Trecho</span>
+            </button>
+          )}
+
           {Boolean(documentData.pdfBytes) && (
             <button
               type="button"
               onClick={() => setShowRawCanvas((prev) => !prev)}
               className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors ${
                 showRawCanvas
-                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                  ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
                   : 'bg-indigo-500/15 border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/25'
               }`}
               title={
                 showRawCanvas
-                  ? 'Voltar para a Folha de Estudo Limpa (Estilo Demo)'
-                  : 'Espiar imagem bruta da página do PDF'
+                  ? 'Alternar para Modo Texto Corrido'
+                  : 'Voltar para Página Real do PDF (com Gráficos, Tabelas e Imagens)'
               }
             >
               {showRawCanvas ? (
                 <>
                   <FileCheck2 className="w-3 h-3" />
-                  <span className="hidden md:inline">Folha Limpa (Demo)</span>
+                  <span className="hidden md:inline">Modo Texto</span>
                 </>
               ) : (
                 <>
                   <Eye className="w-3 h-3" />
-                  <span className="hidden md:inline">Ver PDF Bruto</span>
+                  <span className="hidden md:inline">Ver PDF c/ Gráficos</span>
                 </>
               )}
             </button>
@@ -328,7 +346,7 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
         </div>
       </div>
 
-      {/* Main Content Area: Clean Demo-Style Study Sheet (Default) OR Raw PDF Canvas */}
+      {/* Main Content Area: Original PDF Canvas with Graphics/Tables Preserved (Default) OR Clean Text Sheet */}
       <div className="flex-1 overflow-auto p-3 sm:p-6 flex justify-center items-start">
         {showRawCanvas && documentData.pdfBytes ? (
           <div className="relative shadow-2xl rounded-lg overflow-hidden border border-slate-800 bg-white inline-block">
@@ -338,6 +356,42 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
               </div>
             )}
             <canvas ref={canvasRef} className="block max-w-full h-auto" />
+
+            {/* Interactive Clickable Paragraph Zones on the PDF Canvas (Click any paragraph to read from there) */}
+            <div className="absolute inset-0">
+              {groupedPageParagraphs.map(({ pIdx, sents }) => {
+                const firstSent = sents[0];
+                if (!firstSent) return null;
+                const allBoxes = sents.flatMap((s) => s.bboxes || []);
+                if (allBoxes.length === 0) return null;
+
+                const minX = Math.max(0, Math.min(...allBoxes.map((b) => b.x)) - 0.008);
+                const minY = Math.max(0, Math.min(...allBoxes.map((b) => b.y)) - 0.004);
+                const maxX = Math.min(
+                  1,
+                  Math.max(...allBoxes.map((b) => b.x + b.width)) + 0.008
+                );
+                const maxY = Math.min(
+                  1,
+                  Math.max(...allBoxes.map((b) => b.y + b.height)) + 0.004
+                );
+
+                return (
+                  <div
+                    key={`click-par-${pIdx}`}
+                    onClick={() => onSelectSentence(firstSent.globalIndex, true)}
+                    title="Clique para ler a partir deste parágrafo"
+                    style={{
+                      left: `${minX * 100}%`,
+                      top: `${minY * 100}%`,
+                      width: `${Math.max(0.05, maxX - minX) * 100}%`,
+                      height: `${Math.max(0.02, maxY - minY) * 100}%`,
+                    }}
+                    className="absolute rounded cursor-pointer transition-colors hover:bg-indigo-500/10 hover:ring-1 hover:ring-indigo-400/50"
+                  />
+                );
+              })}
+            </div>
 
             {/* Synchronized BBox Highlighter Overlay on top of Original PDF Canvas */}
             <div className="absolute inset-0 pointer-events-none">
@@ -371,6 +425,64 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
                   </div>
                 );
               })}
+
+              {/* Floating Quick Action Pill above active highlight (Explain with AI or Skip Paragraph) */}
+              {mergedHighlightBands.length > 0 && currentSentence && (
+                <div
+                  style={{
+                    left: `${Math.min(60, Math.max(4, mergedHighlightBands[0].x * 100))}%`,
+                    top: `${Math.max(1, mergedHighlightBands[0].y * 100 - 4.2)}%`,
+                  }}
+                  className="absolute z-20 pointer-events-auto flex items-center gap-1 bg-slate-900/95 text-white px-2 py-1 rounded-lg shadow-lg border border-slate-700 text-[10px] font-semibold"
+                >
+                  {onAskAiAboutCurrentSentence && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onAskAiAboutCurrentSentence(
+                          'Explique este trecho de forma clara, simples e detalhada.'
+                        );
+                      }}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-violet-600 hover:bg-violet-500 text-white transition-colors"
+                    >
+                      <Sparkles className="w-2.5 h-2.5" />
+                      <span>Explicar c/ IA</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const nextParSent = documentData.sentences.find(
+                        (s) =>
+                          s.globalIndex > currentSentence.globalIndex &&
+                          (s.paragraphIndex !== currentSentence.paragraphIndex ||
+                            s.pageNumber !== currentSentence.pageNumber)
+                      );
+                      if (nextParSent) {
+                        onSelectSentence(
+                          nextParSent.globalIndex,
+                          readerState === 'reading'
+                        );
+                      } else if (
+                        currentSentence.globalIndex + 1 <
+                        documentData.sentences.length
+                      ) {
+                        onSelectSentence(
+                          currentSentence.globalIndex + 1,
+                          readerState === 'reading'
+                        );
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
+                    title="Pular para o próximo parágrafo"
+                  >
+                    <SkipForward className="w-2.5 h-2.5" />
+                    <span>Pular Parágrafo</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ) : (

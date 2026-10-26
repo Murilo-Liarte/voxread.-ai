@@ -11,6 +11,7 @@ import {
   buildCleanStudyDocumentFromAiBlocks,
   buildBlocksFromLineRanges,
   appendCleanStudyBlocksToDocument,
+  isChartOrTableArtifact,
 } from '../services/pdfService';
 import {
   buildProviderRequest,
@@ -26,6 +27,8 @@ import {
   pcmBase64ToWavBlob,
   formatExpressiveTextForNeuralTts,
   PIPER_WASM_PATHS,
+  computeCalibratedPlaybackRate,
+  BASE_CADENCE_FACTOR,
 } from '../services/speechService';
 import {
   loadVoiceSettings,
@@ -616,5 +619,65 @@ describe('Fast Line-Range Gemini Classification, Progressive PDF Loading & Page 
     expect(cachedMap.get(5)?.[0].text).toBe(
       'Conteúdo limpo em cache para abertura instantânea.'
     );
+  });
+
+  it('skips reading inside charts, tables, figure captions, and axes while preserving didactic study text', () => {
+    // 1. Multi-column table row with large horizontal X gaps
+    expect(
+      isChartOrTableArtifact({
+        text: 'Cargo Efetivo   120 vagas   R$ 12.500,00',
+        pdfY: 500,
+        normY: 0.4,
+        lineHeight: 11,
+        boxes: [
+          { x: 0.1, y: 0.4, width: 0.18, height: 0.02 },
+          { x: 0.42, y: 0.4, width: 0.12, height: 0.02 },
+          { x: 0.72, y: 0.4, width: 0.16, height: 0.02 },
+        ],
+      })
+    ).toBe(true);
+
+    // 2. Numeric chart axis / percentage scale
+    expect(
+      isChartOrTableArtifact({
+        text: '0% 20% 40% 60% 80% 100%',
+        pdfY: 420,
+        normY: 0.5,
+        lineHeight: 10,
+        boxes: [{ x: 0.15, y: 0.5, width: 0.6, height: 0.02 }],
+      })
+    ).toBe(true);
+
+    // 3. Figure / Table caption & source line
+    expect(
+      isChartOrTableArtifact({
+        text: 'Fonte: IBGE / Elaboração própria (2025)',
+        pdfY: 380,
+        normY: 0.55,
+        lineHeight: 10,
+        boxes: [{ x: 0.1, y: 0.55, width: 0.5, height: 0.02 }],
+      })
+    ).toBe(true);
+
+    // 4. Normal didactic paragraph & Law Article must NOT be skipped
+    expect(
+      isChartOrTableArtifact({
+        text: 'Art. 37. A administração pública direta e indireta de qualquer dos Poderes obedecerá aos princípios de legalidade e eficiência.',
+        pdfY: 600,
+        normY: 0.3,
+        lineHeight: 12,
+        boxes: [{ x: 0.08, y: 0.3, width: 0.84, height: 0.025 }],
+      })
+    ).toBe(false);
+  });
+
+  it('recalibrates voice playback rate down for calm, unhurried study reading', () => {
+    const settings = loadVoiceSettings();
+    expect(settings.rate).toBe(0.85);
+    expect(settings.autoFlashcardsOnTopicEnd).toBe(false);
+
+    const calibrated085 = computeCalibratedPlaybackRate(0.85);
+    expect(calibrated085).toBeCloseTo(0.85 * BASE_CADENCE_FACTOR, 2);
+    expect(calibrated085).toBeLessThan(0.7);
   });
 });

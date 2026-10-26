@@ -74,7 +74,7 @@ import type {
   VoiceSettings,
 } from './types';
 
-const SPEED_STEPS = [0.85, 1.0, 1.15, 1.3, 1.5, 1.75];
+const SPEED_STEPS = [0.65, 0.75, 0.85, 0.95, 1.05, 1.2];
 
 interface PendingPdfUploadState {
   file: File;
@@ -90,7 +90,7 @@ export const App: React.FC = () => {
   const [wordProgressRatio, setWordProgressRatio] = useState<number>(0);
   const [readerState, setReaderState] = useState<ReaderState>('idle');
   const [viewMode, setViewMode] = useState<ViewMode>('pdf');
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('flashcards');
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('professor');
   const [isAiPanelOpen, setIsAiPanelOpen] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth >= 1024 : false
   );
@@ -141,6 +141,14 @@ export const App: React.FC = () => {
   const flashcardsRef = useRef<FlashcardItem[]>(flashcards);
   const extractionAbortRef = useRef<AbortController | null>(null);
   const waitingForNextBatchRef = useRef<number | null>(null);
+  const readingPauseTimerRef = useRef<any>(null);
+
+  const clearReadingPauseTimer = useCallback(() => {
+    if (readingPauseTimerRef.current) {
+      clearTimeout(readingPauseTimerRef.current);
+      readingPauseTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     docRef.current = documentData;
@@ -413,9 +421,10 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Core recursive function that reads a sentence and advances to the next
+  // Core recursive function that reads a sentence and advances to the next with a calm breathing pause
   const speakSentenceAtIndex = useCallback(
     (indexToRead: number) => {
+      clearReadingPauseTimer();
       const doc = docRef.current;
       if (!doc || doc.sentences.length === 0) return;
 
@@ -483,19 +492,21 @@ export const App: React.FC = () => {
               return;
             }
             setReaderState('idle');
-            handleGenerateSummary();
             return;
           }
 
-          if (
-            sentence.isTopicEnd &&
-            voiceSettingsRef.current.autoFlashcardsOnTopicEnd
-          ) {
-            handleTriggerTopicFlashcards(sentence.topicId, nextIdx);
-            return;
-          }
+          const nextSent = currentDoc.sentences[nextIdx];
+          const isParagraphOrHeadingTransition =
+            sentence.blockType === 'heading' ||
+            (nextSent &&
+              (nextSent.paragraphIndex !== sentence.paragraphIndex ||
+                nextSent.pageNumber !== sentence.pageNumber));
+          const breathingPauseMs = isParagraphOrHeadingTransition ? 850 : 480;
 
-          speakSentenceAtIndex(nextIdx);
+          readingPauseTimerRef.current = setTimeout(() => {
+            readingPauseTimerRef.current = null;
+            speakSentenceAtIndex(nextIdx);
+          }, breathingPauseMs);
         },
         onError: (errMsg) => {
           setErrorBanner(errMsg);
@@ -503,7 +514,7 @@ export const App: React.FC = () => {
         },
       });
     },
-    [handleGenerateSummary, handleTriggerTopicFlashcards]
+    [clearReadingPauseTimer]
   );
 
   // Handles asking the Professor AI (via voice barge-in or text input)
@@ -645,6 +656,7 @@ export const App: React.FC = () => {
 
   // Start Voice Interruption ("Modo Professor")
   const handleInterruptWithVoice = useCallback(() => {
+    clearReadingPauseTimer();
     speechService.stopSpeaking();
     setErrorBanner(null);
     setInterimTranscript('');
@@ -668,7 +680,7 @@ export const App: React.FC = () => {
         );
       },
     });
-  }, [triggerAiInteraction]);
+  }, [clearReadingPauseTimer, triggerAiInteraction]);
 
   // Spacebar Shortcut to trigger Professor Voice / Pause
   useEffect(() => {
@@ -689,6 +701,7 @@ export const App: React.FC = () => {
   }, [readerState, handleInterruptWithVoice]);
 
   const handleTogglePlayPause = () => {
+    clearReadingPauseTimer();
     if (readerState === 'reading' || readerState === 'speaking_ai') {
       speechService.stopSpeaking();
       setReaderState('paused');
@@ -1056,6 +1069,7 @@ export const App: React.FC = () => {
   };
 
   const handleSelectSentence = (globalIndex: number, autoPlay = true) => {
+    clearReadingPauseTimer();
     setCurrentSentenceIndex(globalIndex);
     setWordProgressRatio(0);
     updateDocumentReadingProgress(
@@ -1260,6 +1274,16 @@ export const App: React.FC = () => {
                 onSelectPage={handleSelectPage}
                 onSelectSentence={handleSelectSentence}
                 onUploadPdf={handleUploadPdf}
+                onAskAiAboutCurrentSentence={(promptText) => {
+                  setSidebarTab('professor');
+                  setIsAiPanelOpen(true);
+                  triggerAiInteraction(
+                    promptText,
+                    'text',
+                    currentSentenceIndex,
+                    currentSentenceIndex
+                  );
+                }}
               />
             </div>
           )}

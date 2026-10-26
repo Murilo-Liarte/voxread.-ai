@@ -33,13 +33,27 @@ export const PIPER_WASM_PATHS = {
 
 const PIPER_CACHE_NAME = 'voxread-piper-permanent-v1';
 
+/**
+ * Calibrates Piper's naturally fast speaking cadence (~200 WPM at 1.0) down by 22%
+ * so that `1.00x` and `0.85x` sound calm, clear, and unhurried for studying complex topics.
+ */
+export const BASE_CADENCE_FACTOR = 0.78;
+
+export function computeCalibratedPlaybackRate(userRate = 0.85): number {
+  const safeRate = Number.isFinite(userRate) && userRate > 0 ? userRate : 0.85;
+  return Math.max(
+    0.42,
+    Math.min(1.65, +(safeRate * BASE_CADENCE_FACTOR).toFixed(3))
+  );
+}
+
 export function getEngineVoiceLabel(settings: VoiceSettings): string {
   return `Piper Neural · ${settings.piperVoiceId || 'pt_BR-faber-medium'}`;
 }
 
 /**
  * Enhances Portuguese text punctuation so Piper Neural TTS produces natural breathing pauses
- * and emphasis on headings and exam alerts.
+ * and emphasis on headings, clauses, and exam alerts.
  */
 export function formatExpressiveTextForNeuralTts(
   text: string,
@@ -51,6 +65,8 @@ export function formatExpressiveTextForNeuralTts(
     .replace(/\bCF\/88\b/gi, 'Constituição Federal de 88')
     .replace(/\bSTF\b/g, 'S T F')
     .replace(/\bSTJ\b/g, 'S T J')
+    .replace(/;\s+/g, '; ... ')
+    .replace(/:\s+/g, ': ... ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -582,7 +598,10 @@ class SpeechService {
 
       const audioUrl = URL.createObjectURL(audioBlob);
       const audio = new Audio(audioUrl);
-      audio.playbackRate = Math.max(0.5, Math.min(2.0, playbackRate));
+      audio.preservesPitch = true;
+      (audio as any).mozPreservesPitch = true;
+      (audio as any).webkitPreservesPitch = true;
+      audio.playbackRate = computeCalibratedPlaybackRate(playbackRate);
       this.activeAudio = audio;
 
       const cleanup = () => {
@@ -759,7 +778,7 @@ class SpeechService {
       const ok = await this.playAudioBlobWithWordProgress({
         audioBlob: blob,
         text: cleanText,
-        playbackRate: settings.rate || 1.05,
+        playbackRate: settings.rate || 0.85,
         token: currentToken,
         engine: 'piper_wasm',
         voiceLabel: requestedLabel,

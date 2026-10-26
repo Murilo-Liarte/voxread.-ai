@@ -149,7 +149,8 @@ export function isHeaderOrFooterArtifact(
   text: string,
   normalizedY: number | null,
   sanitizeEnabled = true,
-  repetitiveFingerprints?: Set<string>
+  repetitiveFingerprints?: Set<string>,
+  marginBandPct = 0.075
 ): boolean {
   if (!sanitizeEnabled) return false;
   const trimmed = text.trim();
@@ -170,15 +171,115 @@ export function isHeaderOrFooterArtifact(
     }
   }
 
-  if (normalizedY !== null && (normalizedY < 0.085 || normalizedY > 0.915)) {
+  // Geometric Top Header / Bottom Footer Margin Zone
+  if (
+    normalizedY !== null &&
+    marginBandPct > 0 &&
+    (normalizedY < marginBandPct || normalizedY > 1 - marginBandPct)
+  ) {
+    // Anything inside the extreme top/bottom margin band that is a short running header/footer or page marker is skipped by voice
     if (
-      trimmed.length < 110 &&
-      /(cpf|cnpj|direitos reservados|reprodução|estratégia|gran cursos|direção concursos|alfacon|aula\s*\d+|prof\.|professor|curso\s+de|pág|página|\b\d+\s*\/\s*\d+\b|www\.|http|@|licenciado|impresso por|documento exclusivo|material de uso)/i.test(
-        trimmed
-      )
+      trimmed.length < 115 &&
+      !HEADING_TOPIC_REGEX.test(trimmed) &&
+      !ALERT_BOX_REGEX.test(trimmed)
     ) {
       return true;
     }
+  }
+
+  return false;
+}
+
+/**
+ * Detects lines that belong inside charts, tables, diagrams, axes, or figure captions/sources
+ * so the voice reader automatically skips reading scattered numbers/cells aloud while keeping
+ * 100% of the visual chart/table/image intact on the PDF page!
+ */
+export function isChartOrTableArtifact(
+  line: ReconstructedPdfLine,
+  sanitizeEnabled = true
+): boolean {
+  if (!sanitizeEnabled) return false;
+  const trimmed = line.text.trim();
+  if (!trimmed) return true;
+
+  // Never skip main chapter/topic headings, exam alerts, or exam questions
+  if (
+    HEADING_TOPIC_REGEX.test(trimmed) ||
+    ALERT_BOX_REGEX.test(trimmed) ||
+    QUESTION_LIST_REGEX.test(trimmed)
+  ) {
+    return false;
+  }
+
+  // 1. Figure, Chart, Table, Diagram titles or Source/Legend footers
+  if (
+    trimmed.length < 140 &&
+    /^(fonte|elaboração\s+própria|adaptado\s+de|legenda|nota\s+da\s+tabela|gráfico\s+\d+|tabela\s+\d+|figura\s+\d+|quadro\s+\d+|fluxograma\s+\d+|organograma\s+\d+|esquema\s+\d+|mapa\s+mental\b)[:\s-]/i.test(
+      trimmed
+    )
+  ) {
+    return true;
+  }
+
+  // 2. Pipe-delimited table rows (e.g. "Coluna A | Coluna B | Total")
+  const pipeCount = (trimmed.match(/\|/g) || []).length;
+  if (pipeCount >= 2) {
+    return true;
+  }
+
+  // 3. Multi-column table rows or scattered chart/diagram labels detected via horizontal BBox gaps
+  if (line.boxes && line.boxes.length >= 2) {
+    const sortedBoxes = [...line.boxes].sort((a, b) => a.x - b.x);
+    let largeColumnGaps = 0;
+    for (let i = 1; i < sortedBoxes.length; i++) {
+      const prevRight = sortedBoxes[i - 1].x + sortedBoxes[i - 1].width;
+      const gapX = sortedBoxes[i].x - prevRight;
+      if (gapX >= 0.055) {
+        largeColumnGaps++;
+      }
+    }
+    // 2+ wide column jumps on the same horizontal line = multi-column table row or chart axis
+    if (largeColumnGaps >= 2) {
+      return true;
+    }
+    // 1 wide column jump without sentence-ending punctuation on a short line = 2-column table cell or diagram label
+    if (
+      largeColumnGaps === 1 &&
+      trimmed.length < 85 &&
+      !/[.?!:;]$/.test(trimmed)
+    ) {
+      return true;
+    }
+  }
+
+  // 4. Numeric chart axes, scales, percentages, years, and currency data rows
+  const nonSpaceChars = trimmed.replace(/\s+/g, '');
+  if (nonSpaceChars.length > 0 && trimmed.length < 120) {
+    const digitsAndChartSymbols = (
+      nonSpaceChars.match(/[0-9%$€£+=<>|•▪°ºª/\\(),.-]/g) || []
+    ).length;
+    const letters = (nonSpaceChars.match(/[a-zA-ZÀ-ÿ]/g) || []).length;
+    const isLawArticle = /^(art\.|artigo|§|inciso|alínea)\b/i.test(trimmed);
+
+    if (
+      !isLawArticle &&
+      digitsAndChartSymbols >= 4 &&
+      digitsAndChartSymbols / nonSpaceChars.length >= 0.42 &&
+      letters < 35
+    ) {
+      return true;
+    }
+  }
+
+  // 5. Tiny isolated diagram labels / axis words (e.g. "Sim", "Não", "Eixo X", "Total") without sentence punctuation
+  const words = trimmed.split(/\s+/);
+  if (
+    trimmed.length < 16 &&
+    words.length <= 2 &&
+    !/[.?!:;]$/.test(trimmed)
+  ) {
+    return true;
   }
 
   return false;
@@ -816,28 +917,32 @@ export function segmentPageText(
     .replace(/\r\n/g, '\n')
     .replace(/([a-záéíóúâêôãõç])-\n([a-záéíóúâêôãõç])/gi, '$1$2');
 
-  const rawLines = normalized.split('\n');
   let ignoredHeaderFooterCount = 0;
-  const cleanedLines: string[] = [];
+  let rejoined = normalized;
 
-  rawLines.forEach((line, idx) => {
-    const approxY = rawLines.length > 1 ? idx / (rawLines.length - 1) : 0.5;
-    const strippedLine = stripInlineWatermarks(line, sanitizeEnabled);
-    if (
-      isHeaderOrFooterArtifact(
-        strippedLine,
-        approxY,
-        sanitizeEnabled,
-        repetitiveFingerprints
-      )
-    ) {
-      if (line.trim()) ignoredHeaderFooterCount++;
-      return;
-    }
-    cleanedLines.push(strippedLine);
-  });
+  // Only run raw line filtering when `paragraphBBoxes` were not already pre-filtered with true PDF coordinates
+  if (!paragraphBBoxes) {
+    const rawLines = normalized.split('\n');
+    const cleanedLines: string[] = [];
 
-  const rejoined = cleanedLines.join('\n');
+    rawLines.forEach((line) => {
+      const strippedLine = stripInlineWatermarks(line, sanitizeEnabled);
+      if (
+        isHeaderOrFooterArtifact(
+          strippedLine,
+          null,
+          sanitizeEnabled,
+          repetitiveFingerprints
+        )
+      ) {
+        if (line.trim()) ignoredHeaderFooterCount++;
+        return;
+      }
+      cleanedLines.push(strippedLine);
+    });
+
+    rejoined = cleanedLines.join('\n');
+  }
 
   const rawParagraphs = rejoined
     .split(/\n{2,}/)
@@ -1030,7 +1135,8 @@ export async function parsePdfArrayBuffer(
   fileSize: number,
   sanitizeHeadersFooters = true,
   startPageInput?: number,
-  endPageInput?: number
+  endPageInput?: number,
+  marginBandPct = 0.075
 ): Promise<PDFDocumentData> {
   const { rawPages, originalTotalPages, startPage, endPage } =
     await extractRawPagesForRange(fileBuffer, startPageInput, endPageInput);
@@ -1067,7 +1173,12 @@ export async function parsePdfArrayBuffer(
           cleanedLineText,
           line.normY,
           sanitizeHeadersFooters,
-          repetitiveFingerprints
+          repetitiveFingerprints,
+          marginBandPct
+        ) ||
+        isChartOrTableArtifact(
+          { ...line, text: cleanedLineText },
+          sanitizeHeadersFooters
         )
       ) {
         ignoredCount++;
