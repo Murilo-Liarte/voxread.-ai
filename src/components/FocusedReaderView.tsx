@@ -35,28 +35,36 @@ export const FocusedReaderView: React.FC<FocusedReaderViewProps> = ({
   const isReading = readerState === 'reading';
   const activeSentence = documentData.sentences[currentSentenceIndex];
 
-  const pagesWithParagraphs = documentData.pages.map((page) => {
-    const pageSentences = documentData.sentences.filter(
-      (s) => s.pageNumber === page.pageNumber
-    );
-    const maxParagraph = pageSentences.reduce(
-      (max, s) => Math.max(max, s.paragraphIndex),
-      0
-    );
+  const pagesWithParagraphs = documentData.pages
+    .map((page) => {
+      const pageSentences = documentData.sentences.filter(
+        (s) => s.pageNumber === page.pageNumber
+      );
+      const maxParagraph = pageSentences.reduce(
+        (max, s) => Math.max(max, s.paragraphIndex),
+        0
+      );
 
-    const groupedParagraphs: PDFSentence[][] = [];
-    for (let pIdx = 0; pIdx <= maxParagraph; pIdx++) {
-      const sents = pageSentences.filter((s) => s.paragraphIndex === pIdx);
-      if (sents.length > 0) {
-        groupedParagraphs.push(sents);
+      const groupedParagraphs: PDFSentence[][] = [];
+      for (let pIdx = 0; pIdx <= maxParagraph; pIdx++) {
+        const sents = pageSentences.filter((s) => s.paragraphIndex === pIdx);
+        if (sents.length > 0) {
+          groupedParagraphs.push(sents);
+        }
       }
-    }
 
-    return {
-      pageNumber: page.pageNumber,
-      groupedParagraphs,
-    };
-  });
+      return {
+        pageNumber: page.pageNumber,
+        groupedParagraphs,
+      };
+    })
+    .filter((p) => p.groupedParagraphs.length > 0);
+
+  const startRange = documentData.selectedStartPage || 1;
+  const endRange = documentData.selectedEndPage || documentData.totalPages;
+  const hasCustomRange =
+    documentData.originalTotalPages &&
+    (startRange > 1 || endRange < documentData.originalTotalPages);
 
   return (
     <div className="flex flex-col h-full w-full bg-slate-950 overflow-hidden relative">
@@ -68,9 +76,19 @@ export const FocusedReaderView: React.FC<FocusedReaderViewProps> = ({
           >
             {/* Page & Active Topic Header */}
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/70 pb-3 text-[11px] text-slate-400">
-              <span className="font-semibold uppercase tracking-wider text-indigo-400">
-                Página {page.pageNumber} de {documentData.totalPages}
-              </span>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-semibold uppercase tracking-wider text-indigo-400">
+                  Página {page.pageNumber}
+                  {hasCustomRange
+                    ? ` (Intervalo ${startRange} a ${endRange})`
+                    : ` de ${endRange}`}
+                </span>
+                {documentData.aiCleaned && (
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-semibold text-emerald-300">
+                    ✨ Apenas Conteúdo de Estudo
+                  </span>
+                )}
+              </div>
 
               <div className="flex items-center gap-2">
                 {activeSentence && activeSentence.pageNumber === page.pageNumber && (
@@ -114,8 +132,8 @@ export const FocusedReaderView: React.FC<FocusedReaderViewProps> = ({
                       isHeading
                         ? 'font-sans text-lg sm:text-xl font-bold text-white border-l-4 border-indigo-500 pl-3.5 py-0.5'
                         : isAlert
-                        ? 'bg-amber-500/10 border-l-4 border-amber-400 p-4 rounded-r-xl text-amber-100'
-                        : 'leading-[1.85] text-slate-300'
+                          ? 'bg-amber-500/10 border-l-4 border-amber-400 p-4 rounded-r-xl text-amber-100'
+                          : 'leading-[1.85] text-slate-300'
                     }
                   >
                     {isAlert && (
@@ -145,8 +163,8 @@ export const FocusedReaderView: React.FC<FocusedReaderViewProps> = ({
                                 ? isAlert
                                   ? 'bg-amber-500/30 text-white ring-1 ring-amber-400/70'
                                   : isReading
-                                  ? 'bg-indigo-500/30 text-white ring-1 ring-indigo-400/60'
-                                  : 'bg-indigo-500/20 text-indigo-100 ring-1 ring-indigo-500/40'
+                                    ? 'bg-indigo-500/30 text-white ring-1 ring-indigo-400/60'
+                                    : 'bg-indigo-500/20 text-indigo-100 ring-1 ring-indigo-500/40'
                                 : 'hover:bg-slate-800/70 hover:text-slate-100'
                             }`}
                           >

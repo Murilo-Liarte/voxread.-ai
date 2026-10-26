@@ -28,26 +28,12 @@ export interface ProviderConfig {
   aiSanitizePdf?: boolean;
 }
 
-export type TtsEngineMode =
-  | 'piper_wasm'
-  | 'kokoro_webgpu'
-  | 'edge_neural'
-  | 'gemini_tts'
-  | 'openai_cloud'
-  | 'elevenlabs'
-  | 'browser';
+export type TtsEngineMode = 'piper_wasm';
 
 export type PiperVoiceId =
   | 'pt_BR-faber-medium'
   | 'pt_BR-edresson-low'
   | 'pt_PT-tugão-medium';
-
-export type KokoroPtVoiceId = 'pf_dora' | 'pm_alex' | 'pm_santa';
-
-export type EdgeNeuralVoiceId =
-  | 'pt-BR-FranciscaNeural'
-  | 'pt-BR-AntonioNeural'
-  | 'pt-BR-ThalitaMultilingualNeural';
 
 export interface VoiceModelDownloadProgress {
   engine: TtsEngineMode;
@@ -80,16 +66,7 @@ export interface VoiceSettings {
   settingsVersion?: number;
   ttsEngine: TtsEngineMode;
   piperVoiceId: PiperVoiceId;
-  kokoroVoiceId: KokoroPtVoiceId;
-  edgeVoiceId: EdgeNeuralVoiceId;
-  edgeProxyUrl?: string;
   allowSystemVoiceFallback: boolean;
-  browserVoiceURI: string;
-  geminiVoiceName: 'Kore' | 'Aoede' | 'Puck' | 'Charon' | 'Fenrir';
-  cloudVoiceId: 'alloy' | 'echo' | 'fable' | 'onyx' | 'nova' | 'shimmer';
-  elevenLabsVoiceId: string;
-  elevenLabsApiKey?: string;
-  openAiTtsApiKey?: string;
   rate: number; // 0.75 to 2.0
   pitch: number; // 0.8 to 1.2
   expressiveProsody: boolean;
@@ -111,6 +88,13 @@ export interface NormalizedBBox {
 }
 
 export type SentenceBlockType = 'heading' | 'normal' | 'alert' | 'question_item';
+
+export interface AiExtractedStudyBlock {
+  pageNumber: number;
+  blockType: SentenceBlockType;
+  topicTitle?: string;
+  text: string;
+}
 
 export interface PDFSentence {
   id: string;
@@ -147,6 +131,10 @@ export interface PDFDocumentData {
   fileName: string;
   fileSize: number;
   totalPages: number;
+  originalTotalPages?: number;
+  selectedStartPage?: number;
+  selectedEndPage?: number;
+  cleaningMode?: 'ai' | 'basic';
   uploadedAt: number;
   pages: PDFPageContent[];
   sentences: PDFSentence[];
@@ -230,6 +218,10 @@ export interface PdfLibraryItemSummary {
   fileName: string;
   fileSize: number;
   totalPages: number;
+  originalTotalPages?: number;
+  selectedStartPage?: number;
+  selectedEndPage?: number;
+  cleaningMode?: 'ai' | 'basic';
   uploadedAt: number;
   lastReadAt: number;
   currentSentenceIndex: number;

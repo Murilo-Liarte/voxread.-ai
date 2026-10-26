@@ -8,6 +8,9 @@ import {
   ShieldCheck,
   ListTree,
   AlertTriangle,
+  Sparkles,
+  Eye,
+  FileCheck2,
 } from 'lucide-react';
 import { loadPdfProxy } from '../services/pdfService';
 import type { PDFDocumentData, PDFSentence, ReaderState } from '../types';
@@ -39,11 +42,18 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
   const [scale, setScale] = useState<number>(1.2);
   const [pdfProxy, setPdfProxy] = useState<any>(null);
   const [rendering, setRendering] = useState<boolean>(false);
+  // Default to the clean Demo-style study sheet so only pure study text is shown
+  const [showRawCanvas, setShowRawCanvas] = useState<boolean>(false);
 
-  // Load pdfjs document proxy whenever pdfBytes change
+  // Reset to clean Demo-style study view whenever a new document is loaded
+  useEffect(() => {
+    setShowRawCanvas(false);
+  }, [documentData.id]);
+
+  // Load pdfjs document proxy only if the user toggles raw canvas view
   useEffect(() => {
     let active = true;
-    if (!documentData.pdfBytes) {
+    if (!documentData.pdfBytes || !showRawCanvas) {
       setPdfProxy(null);
       return;
     }
@@ -60,18 +70,20 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
     return () => {
       active = false;
     };
-  }, [documentData.id, documentData.pdfBytes]);
+  }, [documentData.id, documentData.pdfBytes, showRawCanvas]);
 
-  // Render active page on canvas
+  // Render active page on canvas when raw canvas mode is active
   useEffect(() => {
     let renderTask: any = null;
     let cancelled = false;
 
     const renderPage = async () => {
-      if (!pdfProxy || !canvasRef.current) return;
+      if (!showRawCanvas || !pdfProxy || !canvasRef.current) return;
       try {
         setRendering(true);
-        const pageNum = Math.min(Math.max(1, currentPage), documentData.totalPages);
+        const maxPdfPage =
+          documentData.originalTotalPages || documentData.totalPages;
+        const pageNum = Math.min(Math.max(1, currentPage), maxPdfPage);
         const page = await pdfProxy.getPage(pageNum);
         if (cancelled) return;
 
@@ -109,9 +121,16 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
         }
       }
     };
-  }, [pdfProxy, currentPage, scale, documentData.totalPages]);
+  }, [
+    showRawCanvas,
+    pdfProxy,
+    currentPage,
+    scale,
+    documentData.totalPages,
+    documentData.originalTotalPages,
+  ]);
 
-  // Auto-scroll the active BBox highlighter smoothly into the center of the screen
+  // Auto-scroll the active highlighter smoothly into the center of the screen
   useEffect(() => {
     if (highlightAnchorRef.current) {
       highlightAnchorRef.current.scrollIntoView({
@@ -121,9 +140,23 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
     }
   }, [currentSentence?.id]);
 
-  const currentPageContent =
-    documentData.pages.find((p) => p.pageNumber === currentPage) ||
-    documentData.pages[0];
+  // Available pages that actually contain study sentences
+  const availablePageNumbers = React.useMemo(() => {
+    const nums = Array.from(
+      new Set(documentData.sentences.map((s) => s.pageNumber))
+    ).sort((a, b) => a - b);
+    return nums.length > 0
+      ? nums
+      : documentData.pages.map((p) => p.pageNumber);
+  }, [documentData.sentences, documentData.pages]);
+
+  const currentPageIdx = availablePageNumbers.indexOf(currentPage);
+  const prevPageNumber =
+    currentPageIdx > 0 ? availablePageNumbers[currentPageIdx - 1] : null;
+  const nextPageNumber =
+    currentPageIdx >= 0 && currentPageIdx < availablePageNumbers.length - 1
+      ? availablePageNumbers[currentPageIdx + 1]
+      : null;
 
   const pageSentences = documentData.sentences.filter(
     (s) => s.pageNumber === currentPage
@@ -152,9 +185,15 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
     return bands;
   }, [activeBoxes]);
 
+  const startRange = documentData.selectedStartPage || 1;
+  const endRange = documentData.selectedEndPage || documentData.totalPages;
+  const hasCustomRange =
+    documentData.originalTotalPages &&
+    (startRange > 1 || endRange < documentData.originalTotalPages);
+
   return (
     <div className="flex flex-col h-full bg-slate-950/80 border-r border-slate-800/80 overflow-hidden">
-      {/* Top Toolbar: Topic Selector, Page Navigation, OCR Sanitizer Badge & Zoom */}
+      {/* Top Toolbar: Topic Selector, Page Navigation, Clean Mode Toggle & Zoom */}
       <div className="h-11 px-3 sm:px-4 border-b border-slate-800/80 bg-slate-900/70 flex items-center justify-between gap-2 shrink-0">
         {/* Topic Jump Selector */}
         <div className="flex items-center gap-1.5 min-w-0">
@@ -172,7 +211,7 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
                 );
               }
             }}
-            className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-200 max-w-[140px] sm:max-w-[230px] truncate focus:outline-none focus:border-indigo-500"
+            className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-200 max-w-[130px] sm:max-w-[220px] truncate focus:outline-none focus:border-indigo-500"
             title="Navegar diretamente para um tópico da apostila"
           >
             {documentData.topics.map((topic, i) => (
@@ -182,69 +221,105 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
             ))}
           </select>
 
-          {currentPageContent?.ignoredHeaderFooterCount > 0 && (
-            <span
-              className="hidden xl:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[10px] text-emerald-300 font-medium"
-              title="Cabeçalhos, rodapés e marcas d'água repetitivas ignorados na leitura por voz"
-            >
-              <ShieldCheck className="w-3 h-3" />
-              <span>Filtro Cabeçalho Ativo</span>
+          <span
+            className="hidden xl:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-[10px] text-emerald-300 font-medium"
+            title="Exibindo apenas o conteúdo puro de estudo destacado para leitura"
+          >
+            <ShieldCheck className="w-3 h-3" />
+            <span>
+              {documentData.aiCleaned
+                ? 'Extração Cirúrgica Gemini IA'
+                : 'Texto Limpo Destacado'}
             </span>
-          )}
+          </span>
         </div>
 
-        {/* Page Navigation */}
+        {/* Page Navigation within Selected Range */}
         <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
-            disabled={currentPage <= 1}
-            onClick={() => onSelectPage(currentPage - 1)}
+            disabled={prevPageNumber === null}
+            onClick={() => prevPageNumber !== null && onSelectPage(prevPageNumber)}
             className="p-1 rounded-lg hover:bg-slate-800 text-slate-300 disabled:opacity-30 transition-colors"
-            title="Página anterior"
+            title="Página de estudo anterior"
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
           <span className="text-xs text-slate-300 font-medium px-1">
-            Pág. {currentPage}/{documentData.totalPages}
+            Pág. {currentPage}
+            {hasCustomRange
+              ? ` (${startRange}–${endRange})`
+              : `/${endRange}`}
           </span>
           <button
             type="button"
-            disabled={currentPage >= documentData.totalPages}
-            onClick={() => onSelectPage(currentPage + 1)}
+            disabled={nextPageNumber === null}
+            onClick={() => nextPageNumber !== null && onSelectPage(nextPageNumber)}
             className="p-1 rounded-lg hover:bg-slate-800 text-slate-300 disabled:opacity-30 transition-colors"
-            title="Próxima página"
+            title="Próxima página de estudo"
           >
             <ChevronRight className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Zoom Controls */}
-        <div className="hidden sm:flex items-center gap-1 shrink-0">
-          <button
-            type="button"
-            onClick={() => setScale((s) => Math.max(0.7, +(s - 0.15).toFixed(2)))}
-            className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
-            title="Diminuir zoom"
-          >
-            <ZoomOut className="w-3.5 h-3.5" />
-          </button>
-          <span className="text-[11px] text-slate-400 w-10 text-center font-mono">
-            {Math.round(scale * 100)}%
-          </span>
-          <button
-            type="button"
-            onClick={() => setScale((s) => Math.min(2.2, +(s + 0.15).toFixed(2)))}
-            className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
-            title="Aumentar zoom"
-          >
-            <ZoomIn className="w-3.5 h-3.5" />
-          </button>
+        {/* Right Controls: Toggle Raw PDF vs Clean Demo Sheet + Zoom */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {Boolean(documentData.pdfBytes) && (
+            <button
+              type="button"
+              onClick={() => setShowRawCanvas((prev) => !prev)}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors ${
+                showRawCanvas
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                  : 'bg-indigo-500/15 border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/25'
+              }`}
+              title={
+                showRawCanvas
+                  ? 'Voltar para a Folha de Estudo Limpa (Estilo Demo)'
+                  : 'Espiar imagem bruta da página do PDF'
+              }
+            >
+              {showRawCanvas ? (
+                <>
+                  <FileCheck2 className="w-3 h-3" />
+                  <span className="hidden md:inline">Folha Limpa (Demo)</span>
+                </>
+              ) : (
+                <>
+                  <Eye className="w-3 h-3" />
+                  <span className="hidden md:inline">Ver PDF Bruto</span>
+                </>
+              )}
+            </button>
+          )}
+
+          <div className="hidden sm:flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setScale((s) => Math.max(0.7, +(s - 0.15).toFixed(2)))}
+              className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
+              title="Diminuir zoom"
+            >
+              <ZoomOut className="w-3.5 h-3.5" />
+            </button>
+            <span className="text-[11px] text-slate-400 w-10 text-center font-mono">
+              {Math.round(scale * 100)}%
+            </span>
+            <button
+              type="button"
+              onClick={() => setScale((s) => Math.min(2.2, +(s + 0.15).toFixed(2)))}
+              className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
+              title="Aumentar zoom"
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Scrollable PDF Sheet with Real-Time BBox Highlighter Overlay */}
+      {/* Main Content Area: Clean Demo-Style Study Sheet (Default) OR Raw PDF Canvas */}
       <div className="flex-1 overflow-auto p-3 sm:p-6 flex justify-center items-start">
-        {documentData.pdfBytes ? (
+        {showRawCanvas && documentData.pdfBytes ? (
           <div className="relative shadow-2xl rounded-lg overflow-hidden border border-slate-800 bg-white inline-block">
             {rendering && (
               <div className="absolute top-2 right-2 z-20 px-2 py-0.5 rounded bg-slate-900/80 text-[10px] text-slate-200">
@@ -274,7 +349,6 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
                         : 'bg-indigo-500/25 ring-1 ring-indigo-500/70'
                     }`}
                   >
-                    {/* Progressive word sweep bar inside the bounding box */}
                     <div
                       style={{
                         width: `${Math.min(100, Math.max(8, wordProgressRatio * 100))}%`,
@@ -289,26 +363,30 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
             </div>
           </div>
         ) : (
-          /* High-Precision Apostila Sheet (Estratégia/Gran Demo Document) with Synchronized Highlighter */
+          /* High-Precision Clean Study Sheet (Identical to Demo) with Synchronized Word-by-Word Highlighter */
           <div
             style={{
               transform: `scale(${scale / 1.2})`,
               transformOrigin: 'top center',
             }}
-            className="w-full max-w-[640px] bg-white text-slate-900 rounded-xl shadow-2xl border border-slate-300 p-6 sm:p-10 transition-transform"
+            className="w-full max-w-[680px] bg-white text-slate-900 rounded-xl shadow-2xl border border-slate-300 p-6 sm:p-10 transition-transform"
           >
-            {/* Simulated Apostila Header (Muted to show Header Sanitizer) */}
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3 mb-6 text-[10px] text-slate-400">
-              <span className="font-semibold uppercase tracking-widest text-indigo-600">
-                Apostila Demonstrativa • Direito Administrativo
+            {/* Clean Study Sheet Header */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-3 mb-6 text-[10px] text-slate-500">
+              <span className="font-semibold uppercase tracking-widest text-indigo-600 truncate max-w-[360px]">
+                {documentData.fileName} • Página {currentPage}
+                {hasCustomRange ? ` (Intervalo ${startRange} a ${endRange})` : ''}
               </span>
-              <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-medium">
-                Cabeçalho/Rodapé Ignorado pelo TTS
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                <Sparkles className="w-3 h-3 text-emerald-600" />
+                {documentData.aiCleaned
+                  ? 'Apenas Conteúdo de Estudo (Limpo por Gemini IA)'
+                  : 'Logos, Cabeçalhos e Rodapés Removidos'}
               </span>
             </div>
 
-            {/* Sentences rendered in original document layout with exact BBox highlight */}
-            <div className="space-y-4 font-serif text-[15px] sm:text-[16px] leading-[1.8] text-slate-800">
+            {/* Clean Study Sentences with Word-by-Word Highlight */}
+            <div className="space-y-4 font-serif text-[15px] sm:text-[16.5px] leading-[1.85] text-slate-800">
               {Array.from(
                 new Set(pageSentences.map((s) => s.paragraphIndex))
               ).map((pIdx) => {
@@ -318,6 +396,9 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
                 const firstSent = sents[0];
                 const isHeading = firstSent?.blockType === 'heading';
                 const isAlert = sents.some((s) => s.blockType === 'alert');
+                const isQuestion = sents.some(
+                  (s) => s.blockType === 'question_item'
+                );
 
                 return (
                   <div
@@ -326,14 +407,16 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
                       isHeading
                         ? 'font-sans text-lg font-bold text-slate-950 border-l-4 border-indigo-600 pl-3 py-0.5 my-2'
                         : isAlert
-                        ? 'bg-amber-50/90 border-l-4 border-amber-500 p-3.5 rounded-r-xl my-3 text-slate-900'
-                        : 'text-justify'
+                          ? 'bg-amber-50/90 border-l-4 border-amber-500 p-3.5 rounded-r-xl my-3 text-slate-900'
+                          : isQuestion
+                            ? 'bg-indigo-50/70 border-l-4 border-indigo-400 p-3.5 rounded-r-xl my-2.5 text-slate-900'
+                            : 'text-justify'
                     }
                   >
                     {isAlert && (
                       <div className="flex items-center gap-1.5 text-xs font-sans font-bold text-amber-800 uppercase tracking-wide mb-1">
                         <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                        <span>Destaque de Banca Examinadora</span>
+                        <span>Destaque de Banca Examinadora / Jurisprudência</span>
                       </div>
                     )}
                     {sents.map((sent) => {
@@ -350,8 +433,8 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
                           className={`rounded px-1 py-0.5 mr-1 cursor-pointer transition-all duration-150 ${
                             isActive
                               ? isAlert
-                                ? 'bg-amber-300/70 text-slate-950 font-medium ring-2 ring-amber-500 shadow-xs'
-                                : 'bg-indigo-200/80 text-slate-950 font-medium ring-2 ring-indigo-500 shadow-xs'
+                                ? 'bg-amber-300/75 text-slate-950 font-medium ring-2 ring-amber-500 shadow-xs'
+                                : 'bg-indigo-200/85 text-slate-950 font-medium ring-2 ring-indigo-500 shadow-xs'
                               : 'hover:bg-slate-100'
                           }`}
                         >
@@ -376,7 +459,7 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
             {/* Footer Upload Prompt */}
             <div className="mt-8 pt-4 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs text-slate-500">
-                Envie seu PDF do Estratégia, Gran Cursos ou livro para estudo sincronizado:
+                Envie outro PDF ou selecione um novo intervalo de páginas (ex: 50 a 71):
               </span>
               <input
                 ref={fileInputRef}
@@ -384,7 +467,10 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
                 accept="application/pdf,.pdf"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
-                  if (file) onUploadPdf(file);
+                  if (file) {
+                    onUploadPdf(file);
+                    e.target.value = '';
+                  }
                 }}
                 className="hidden"
               />
@@ -394,7 +480,7 @@ export const PdfOriginalViewer: React.FC<PdfOriginalViewerProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors"
               >
                 <Upload className="w-3.5 h-3.5" />
-                <span>Enviar Minha Apostila PDF</span>
+                <span>Enviar PDF (Escolher Páginas)</span>
               </button>
             </div>
           </div>

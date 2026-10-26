@@ -183,6 +183,15 @@ export const PdfLibraryModal: React.FC<PdfLibraryModalProps> = ({
                           Aberto Agora
                         </span>
                       )}
+                      {item.selectedStartPage && item.selectedEndPage && (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700">
+                          Págs. {item.selectedStartPage} a {item.selectedEndPage}
+                          {item.originalTotalPages &&
+                          item.originalTotalPages > item.selectedEndPage
+                            ? ` (de ${item.originalTotalPages})`
+                            : ''}
+                        </span>
+                      )}
                       {item.removedNoiseCount > 0 && (
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 inline-flex items-center gap-1">
                           <CheckCircle2 className="w-3 h-3" />
@@ -191,7 +200,7 @@ export const PdfLibraryModal: React.FC<PdfLibraryModalProps> = ({
                       )}
                       {item.aiCleaned && (
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-500/15 text-violet-300 border border-violet-500/30">
-                          ✨ Limpo por Gemini IA
+                          ✨ Conteúdo Puro (Gemini IA)
                         </span>
                       )}
                     </div>

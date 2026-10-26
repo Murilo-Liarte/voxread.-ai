@@ -13,11 +13,9 @@ import {
   Play,
   Download,
   Cpu,
-  Zap,
-  Radio,
   Activity,
-  ShieldAlert,
   RefreshCw,
+  HardDrive,
 } from 'lucide-react';
 import {
   fetchAvailableGeminiModels,
@@ -59,12 +57,12 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
   const [draftVoice, setDraftVoice] = useState<VoiceSettings>(voiceSettings);
   const [activeTab, setActiveTab] = useState<'voice' | 'ai'>('voice');
   const [showKey, setShowKey] = useState(false);
-  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [geminiModelsList, setGeminiModelsList] = useState<GeminiModelOption[]>(
     PROVIDERS_CATALOG.gemini.models
   );
   const [isSyncingModels, setIsSyncingModels] = useState(false);
   const [isPreloadingVoice, setIsPreloadingVoice] = useState(false);
+  const [isVoiceCachedLocally, setIsVoiceCachedLocally] = useState(false);
   const [preloadDoneMsg, setPreloadDoneMsg] = useState<string | null>(null);
   const [isRunningDiagnostics, setIsRunningDiagnostics] = useState(false);
   const [diagnosticResults, setDiagnosticResults] = useState<
@@ -78,26 +76,26 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
 
   useEffect(() => {
     setDraftConfig(providerConfig);
-    setDraftVoice(voiceSettings);
+    setDraftVoice({
+      ...voiceSettings,
+      ttsEngine: 'piper_wasm',
+    });
     setTestState({ loading: false });
     setPreloadDoneMsg(null);
   }, [providerConfig, voiceSettings, isOpen]);
 
   useEffect(() => {
-    const updateVoices = () => {
-      const voices = speechService.getVoices();
-      setAvailableVoices(voices);
-      if (!draftVoice.browserVoiceURI && voices.length > 0) {
-        const best = speechService.getBestDefaultVoiceURI();
-        setDraftVoice((prev) => ({ ...prev, browserVoiceURI: best }));
-      }
+    if (!isOpen) return;
+    let mounted = true;
+    speechService
+      .isPiperVoiceCachedLocally(draftVoice.piperVoiceId || 'pt_BR-faber-medium')
+      .then((cached: boolean) => {
+        if (mounted) setIsVoiceCachedLocally(cached);
+      });
+    return () => {
+      mounted = false;
     };
-
-    updateVoices();
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.onvoiceschanged = updateVoices;
-    }
-  }, [isOpen]);
+  }, [isOpen, draftVoice.piperVoiceId]);
 
   if (!isOpen) return null;
 
@@ -168,8 +166,9 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
       await speechService.preloadPiperVoice(
         draftVoice.piperVoiceId || 'pt_BR-faber-medium'
       );
+      setIsVoiceCachedLocally(true);
       setPreloadDoneMsg(
-        'Voz neural baixada e salva em cache permanente no navegador! Pronta para leitura 100% offline.'
+        'Voz Piper Neural + WASM salvos permanentemente no navegador (OPFS + CacheStorage)! Ela não precisará recarregar quando você reabrir o site.'
       );
     } catch (err: any) {
       setPreloadDoneMsg(
@@ -184,11 +183,12 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
     setIsRunningDiagnostics(true);
     setDiagnosticResults(null);
     try {
-      const results = await speechService.runVoiceDiagnostics(
-        draftVoice,
-        draftConfig.apiKeys.gemini
-      );
+      const results = await speechService.runVoiceDiagnostics(draftVoice);
       setDiagnosticResults(results);
+      const cached = await speechService.isPiperVoiceCachedLocally(
+        draftVoice.piperVoiceId || 'pt_BR-faber-medium'
+      );
+      setIsVoiceCachedLocally(cached);
     } finally {
       setIsRunningDiagnostics(false);
     }
@@ -199,13 +199,15 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
       text: 'Atenção para esta dica de prova! Enquanto na esfera privada o particular pode fazer tudo que a lei não proíbe, na Administração Pública o gestor só age quando a lei autoriza.',
       blockType: 'alert',
       settings: draftVoice,
-      geminiKeyFallback: draftConfig.apiKeys.gemini,
     });
   };
 
   const handleSaveAll = () => {
     onSaveProviderConfig(draftConfig);
-    onSaveVoiceSettings(draftVoice);
+    onSaveVoiceSettings({
+      ...draftVoice,
+      ttsEngine: 'piper_wasm',
+    });
     onClose();
   };
 
@@ -220,10 +222,10 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-slate-100">
-                Voz Neural & Google AI Studio (Gemini)
+                Piper Neural & Google AI Studio (Gemini)
               </h2>
               <p className="text-xs text-slate-400">
-                Salvo automaticamente na sua conta sem precisar configurar toda vez
+                Voz neural com cache permanente (não recarrega ao abrir o site) + IA Gemini
               </p>
             </div>
           </div>
@@ -248,7 +250,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
             }`}
           >
             <Volume2 className="w-4 h-4" />
-            <span>1. Voz Neural Expressiva (Sem API)</span>
+            <span>1. Voz Piper Neural (Cache Permanente)</span>
           </button>
           <button
             type="button"
@@ -268,342 +270,99 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
         <div className="p-5 sm:p-6 overflow-y-auto space-y-5 flex-1">
           {activeTab === 'voice' ? (
             <div className="space-y-5">
-              {/* Zero-API Expressive Neural Engines */}
+              {/* Exclusive Piper Neural Engine Card */}
               <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-4">
-                <div>
-                  <div className="flex items-center justify-between mb-2.5">
-                    <label className="block text-xs font-bold uppercase tracking-wider text-emerald-400">
-                      Motores Neurais Zero-API (100% Gratuitos & Reais)
-                    </label>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
-                      Sem Chave de API
-                    </span>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+                  <div className="flex items-start gap-3">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
+                      <Cpu className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-bold text-white">
+                          Motor Oficial: Piper Neural WASM (Offline)
+                        </span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                          OPFS + CacheStorage Permanente
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                        Os arquivos do modelo neural ONNX e do fonemizador WASM ficam gravados no disco local do navegador — abertura instantânea sem baixar de novo!
+                      </p>
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                    {/* 1. Piper Neural Offline WASM */}
-                    <button
-                      type="button"
-                      onClick={() =>
+                  <div className="shrink-0">
+                    {isVoiceCachedLocally ? (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-[11px] font-bold">
+                        <HardDrive className="w-3.5 h-3.5" />
+                        Salvo no Dispositivo
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[11px] font-semibold">
+                        Download único pendente
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Piper Voice Selector + Preload Button */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">
+                      Timbre da Voz Piper Neural (Português)
+                    </label>
+                    <select
+                      value={draftVoice.piperVoiceId || 'pt_BR-faber-medium'}
+                      onChange={(e) =>
                         setDraftVoice((prev) => ({
                           ...prev,
                           ttsEngine: 'piper_wasm',
+                          piperVoiceId: e.target.value as any,
                         }))
                       }
-                      className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between ${
-                        draftVoice.ttsEngine === 'piper_wasm'
-                          ? 'bg-emerald-600/20 border-emerald-500 text-white shadow-sm'
-                          : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
-                      }`}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
                     >
-                      <div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-xs font-bold flex items-center gap-1.5">
-                            <Cpu className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                            Piper Neural WASM
-                          </span>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">
-                            Padrão
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                          Roda 100% dentro do navegador via ONNX 1.30. Baixa uma única vez (~18MB) e funciona offline!
-                        </p>
-                      </div>
-                    </button>
-
-                    {/* 2. Kokoro-82M WebGPU/WASM */}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          ttsEngine: 'kokoro_webgpu',
-                        }))
-                      }
-                      className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between ${
-                        draftVoice.ttsEngine === 'kokoro_webgpu'
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-sm'
-                          : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
-                      }`}
-                    >
-                      <div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-xs font-bold flex items-center gap-1.5">
-                            <Zap className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                            Kokoro-82M Neural
-                          </span>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold">
-                            Ultra Realista
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                          Modelo neural de 82M parâmetros com fonemizador PT-BR nativo e timbres Dora, Alex e Santa.
-                        </p>
-                      </div>
-                    </button>
-
-                    {/* 3. Edge Neural Stream */}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          ttsEngine: 'edge_neural',
-                        }))
-                      }
-                      className={`p-3 rounded-xl border text-left transition-all flex flex-col justify-between ${
-                        draftVoice.ttsEngine === 'edge_neural'
-                          ? 'bg-violet-600/20 border-violet-500 text-white shadow-sm'
-                          : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
-                      }`}
-                    >
-                      <div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-xs font-bold flex items-center gap-1.5">
-                            <Radio className="w-3.5 h-3.5 text-violet-400 shrink-0" />
-                            Edge Neural Studio
-                          </span>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 font-bold">
-                            Proxy/Local
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                          Vozes neurais da Microsoft (Francisca, Thalita e Antonio) via servidor local ou Cloudflare Worker.
-                        </p>
-                      </div>
-                    </button>
+                      <option value="pt_BR-faber-medium">
+                        Faber Neural (pt-BR • Masculina Didática de Estúdio — Recomendada)
+                      </option>
+                      <option value="pt_BR-edresson-low">
+                        Edresson Neural (pt-BR • Masculina Ultra-Leve e Rápida)
+                      </option>
+                      <option value="pt_PT-tugão-medium">
+                        Tugão Neural (pt-PT • Masculina Articulada)
+                      </option>
+                    </select>
                   </div>
-                </div>
 
-                {/* Secondary API / System Engines */}
-                <div className="pt-2 border-t border-slate-800/80">
-                  <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">
-                    Ou use Gemini Audio API / Sistema:
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          ttsEngine: 'gemini_tts',
-                        }))
-                      }
-                      className={`px-2.5 py-2 rounded-lg border text-left text-xs transition-all ${
-                        draftVoice.ttsEngine === 'gemini_tts'
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white font-bold'
-                          : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      Gemini Audio API
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          ttsEngine: 'browser',
-                        }))
-                      }
-                      className={`px-2.5 py-2 rounded-lg border text-left text-xs transition-all ${
-                        draftVoice.ttsEngine === 'browser'
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white font-bold'
-                          : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      Voz do Sistema
-                    </button>
-                  </div>
-                </div>
-
-                {/* Engine-Specific Configuration */}
-                {draftVoice.ttsEngine === 'piper_wasm' && (
-                  <div className="space-y-3 pt-2 border-t border-slate-800/80">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
-                      <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">
-                          Voz Neural Offline (Português)
-                        </label>
-                        <select
-                          value={draftVoice.piperVoiceId || 'pt_BR-faber-medium'}
-                          onChange={(e) =>
-                            setDraftVoice((prev) => ({
-                              ...prev,
-                              piperVoiceId: e.target.value as any,
-                            }))
-                          }
-                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                        >
-                          <option value="pt_BR-faber-medium">
-                            Faber Neural (pt-BR • Masculina Didática de Estúdio — Recomendada)
-                          </option>
-                          <option value="pt_BR-edresson-low">
-                            Edresson Neural (pt-BR • Masculina Ultra-Leve e Rápida)
-                          </option>
-                          <option value="pt_PT-tugão-medium">
-                            Tugão Neural (pt-PT • Masculina Articulada)
-                          </option>
-                        </select>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={handlePreloadPiperModel}
-                        disabled={isPreloadingVoice}
-                        className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 text-xs font-bold transition-colors disabled:opacity-50"
-                      >
-                        {isPreloadingVoice ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            <span>Baixando Modelo Neural...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Download className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>Pré-Baixar Voz Offline (OPFS)</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-
-                    {preloadDoneMsg && (
-                      <p className="text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2">
-                        {preloadDoneMsg}
-                      </p>
+                  <button
+                    type="button"
+                    onClick={handlePreloadPiperModel}
+                    disabled={isPreloadingVoice}
+                    className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-200 border border-emerald-500/40 text-xs font-bold transition-colors disabled:opacity-50"
+                  >
+                    {isPreloadingVoice ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Salvando no Cache Permanente...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>
+                          {isVoiceCachedLocally
+                            ? 'Verificar / Atualizar Cache Local'
+                            : 'Baixar e Fixar Voz no Navegador'}
+                        </span>
+                      </>
                     )}
-                  </div>
-                )}
+                  </button>
+                </div>
 
-                {draftVoice.ttsEngine === 'kokoro_webgpu' && (
-                  <div className="space-y-2 pt-2 border-t border-slate-800/80">
-                    <label className="block text-xs font-medium text-slate-300">
-                      Timbre Neural Kokoro-82M (Português Brasileiro Nativo)
-                    </label>
-                    <select
-                      value={draftVoice.kokoroVoiceId || 'pf_dora'}
-                      onChange={(e) =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          kokoroVoiceId: e.target.value as any,
-                        }))
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                    >
-                      <option value="pf_dora">
-                        Dora (pf_dora • Feminina Calorosa, Expressiva e Natural — Recomendada)
-                      </option>
-                      <option value="pm_alex">
-                        Alex (pm_alex • Masculina Dinâmica de Professor)
-                      </option>
-                      <option value="pm_santa">
-                        Santa (pm_santa • Masculina Grave e Serena)
-                      </option>
-                    </select>
-                    <p className="text-[11px] text-slate-400">
-                      ✨ Na primeira leitura, o modelo neural Kokoro q8 (~86MB) é baixado automaticamente e salvo em cache no navegador.
-                    </p>
-                  </div>
-                )}
-
-                {draftVoice.ttsEngine === 'edge_neural' && (
-                  <div className="space-y-3 pt-2 border-t border-slate-800/80">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">
-                          Timbre Microsoft Edge Neural (pt-BR)
-                        </label>
-                        <select
-                          value={draftVoice.edgeVoiceId || 'pt-BR-FranciscaNeural'}
-                          onChange={(e) =>
-                            setDraftVoice((prev) => ({
-                              ...prev,
-                              edgeVoiceId: e.target.value as any,
-                            }))
-                          }
-                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                        >
-                          <option value="pt-BR-FranciscaNeural">
-                            Francisca Neural (Feminina • Calorosa e Fluida)
-                          </option>
-                          <option value="pt-BR-ThalitaMultilingualNeural">
-                            Thalita Multilingual Neural (Feminina • Estúdio)
-                          </option>
-                          <option value="pt-BR-AntonioNeural">
-                            Antonio Neural (Masculina • Didática de Professor)
-                          </option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">
-                          Endpoint de Proxy (Opcional)
-                        </label>
-                        <input
-                          type="text"
-                          value={draftVoice.edgeProxyUrl || ''}
-                          onChange={(e) =>
-                            setDraftVoice((prev) => ({
-                              ...prev,
-                              edgeProxyUrl: e.target.value,
-                            }))
-                          }
-                          placeholder="https://..."
-                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 font-mono"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {draftVoice.ttsEngine === 'gemini_tts' && (
-                  <div className="space-y-2 pt-2 border-t border-slate-800/80">
-                    <label className="block text-xs font-medium text-slate-300">
-                      Timbre da Voz Neural Gemini
-                    </label>
-                    <select
-                      value={draftVoice.geminiVoiceName || 'Kore'}
-                      onChange={(e) =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          geminiVoiceName: e.target.value as any,
-                        }))
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                    >
-                      <option value="Kore">Kore (Feminina calorosa, firme e muito didática)</option>
-                      <option value="Aoede">Aoede (Feminina expressiva e natural)</option>
-                      <option value="Puck">Puck (Masculina dinâmica e entusiasmada)</option>
-                      <option value="Charon">Charon (Masculina serena e articulada)</option>
-                      <option value="Fenrir">Fenrir (Masculina grave com presença de aula)</option>
-                    </select>
-                  </div>
-                )}
-
-                {draftVoice.ttsEngine === 'browser' && (
-                  <div className="pt-2 border-t border-slate-800/80">
-                    <label className="block text-xs font-medium text-slate-300 mb-1">
-                      Voz Neural do Dispositivo
-                    </label>
-                    <select
-                      value={draftVoice.browserVoiceURI}
-                      onChange={(e) =>
-                        setDraftVoice((prev) => ({
-                          ...prev,
-                          browserVoiceURI: e.target.value,
-                        }))
-                      }
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100"
-                    >
-                      {availableVoices.length === 0 && (
-                        <option value="">Voz padrão do sistema (pt-BR)</option>
-                      )}
-                      {availableVoices.map((v) => (
-                        <option key={v.voiceURI} value={v.voiceURI}>
-                          {v.name} ({v.lang})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                {preloadDoneMsg && (
+                  <p className="text-[11px] text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2">
+                    {preloadDoneMsg}
+                  </p>
                 )}
 
                 {/* Live Download Progress Indicator when downloading offline neural model */}
@@ -661,7 +420,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                       className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-200 border border-indigo-500/40 text-xs font-bold transition-colors"
                     >
                       <Play className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>Testar Entonação da Voz</span>
+                      <span>Testar Voz Piper Neural</span>
                     </button>
                   </div>
                 </div>
@@ -672,18 +431,15 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     className={`rounded-xl px-3.5 py-2.5 border text-xs flex items-start justify-between gap-3 ${
                       engineStatus.state === 'failed'
                         ? 'bg-rose-500/10 border-rose-500/40 text-rose-200'
-                        : engineStatus.state === 'fallback'
-                          ? 'bg-amber-500/10 border-amber-500/40 text-amber-200'
-                          : engineStatus.state === 'loading'
-                            ? 'bg-indigo-500/10 border-indigo-500/40 text-indigo-200'
-                            : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200'
+                        : engineStatus.state === 'loading'
+                          ? 'bg-indigo-500/10 border-indigo-500/40 text-indigo-200'
+                          : 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200'
                     }`}
                   >
                     <div className="flex items-start gap-2">
                       {engineStatus.state === 'loading' ? (
                         <Loader2 className="w-4 h-4 animate-spin shrink-0 mt-0.5 text-indigo-400" />
-                      ) : engineStatus.state === 'failed' ||
-                        engineStatus.state === 'fallback' ? (
+                      ) : engineStatus.state === 'failed' ? (
                         <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
                       ) : (
                         <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-400" />
@@ -691,7 +447,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                       <div>
                         <span className="font-bold block">
                           {engineStatus.state === 'playing' &&
-                            `Tocando agora: ${engineStatus.voiceLabel}${
+                            `Piper Neural ativo: ${engineStatus.voiceLabel}${
                               engineStatus.latencyMs
                                 ? ` (${engineStatus.latencyMs}ms)`
                                 : ''
@@ -699,9 +455,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                           {engineStatus.state === 'loading' &&
                             `Sintetizando áudio neural: ${engineStatus.voiceLabel}...`}
                           {engineStatus.state === 'failed' &&
-                            `Motor bloqueado (sem cair na voz robótica): ${engineStatus.voiceLabel}`}
-                          {engineStatus.state === 'fallback' &&
-                            `Usando Voz do Sistema (Fallback): ${engineStatus.voiceLabel}`}
+                            `Falha ao sintetizar: ${engineStatus.voiceLabel}`}
                         </span>
                         {engineStatus.error && (
                           <span className="block text-[11px] opacity-90 mt-0.5">
@@ -714,16 +468,16 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                 )}
               </div>
 
-              {/* 🩺 Voice Diagnostic & Side-by-Side Audio Comparator Panel */}
+              {/* Piper Voice Diagnostic Panel */}
               <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
                     <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-300 flex items-center gap-1.5">
                       <Activity className="w-4 h-4 text-indigo-400" />
-                      <span>Diagnóstico de Voz & Comparador Lado a Lado</span>
+                      <span>Diagnóstico de Latência & Cache do Piper Neural</span>
                     </h3>
                     <p className="text-[11px] text-slate-400 mt-0.5">
-                      Teste todos os motores neurais de uma vez e clique em Ouvir para comparar a qualidade real de cada um.
+                      Verifica se o modelo neural já está em memória e testa a velocidade de geração.
                     </p>
                   </div>
                   <button
@@ -735,12 +489,12 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     {isRunningDiagnostics ? (
                       <>
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        <span>Testando Motores...</span>
+                        <span>Verificando Piper...</span>
                       </>
                     ) : (
                       <>
                         <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Rodar Diagnóstico</span>
+                        <span>Testar Piper Agora</span>
                       </>
                     )}
                   </button>
@@ -785,33 +539,13 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                               onClick={() =>
                                 speechService.playAudioBlobDirect(
                                   res.audioBlob!,
-                                  res.engine === 'piper_wasm'
-                                    ? draftVoice.rate
-                                    : 1.0
+                                  draftVoice.rate
                                 )
                               }
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold transition-colors"
                             >
                               <Play className="w-3 h-3 fill-current" />
-                              <span>Ouvir</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setDraftVoice((prev) => ({
-                                  ...prev,
-                                  ttsEngine: res.engine,
-                                }))
-                              }
-                              className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
-                                draftVoice.ttsEngine === res.engine
-                                  ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300'
-                                  : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
-                              }`}
-                            >
-                              {draftVoice.ttsEngine === res.engine
-                                ? 'Selecionado'
-                                : 'Usar Este'}
+                              <span>Ouvir Amostra</span>
                             </button>
                           </div>
                         )}
@@ -821,53 +555,8 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                 )}
               </div>
 
-              {/* Study Method & Strict Anti-Robotic Fallback Checkboxes */}
+              {/* Reading Preferences */}
               <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
-                <label className="flex items-start gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={!draftVoice.allowSystemVoiceFallback}
-                    onChange={(e) =>
-                      setDraftVoice((prev) => ({
-                        ...prev,
-                        allowSystemVoiceFallback: !e.target.checked,
-                      }))
-                    }
-                    className="mt-1 rounded accent-emerald-500"
-                  />
-                  <div>
-                    <span className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
-                      <ShieldAlert className="w-3.5 h-3.5 text-emerald-400" />
-                      Bloquear Fallback Silencioso para Voz do Sistema (Google Tradutor)
-                    </span>
-                    <span className="block text-[11px] text-slate-400">
-                      Garante que o app nunca troque silenciosamente para a voz robótica do navegador se um motor falhar.
-                    </span>
-                  </div>
-                </label>
-
-                <label className="flex items-start gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={draftVoice.sanitizeHeadersFooters}
-                    onChange={(e) =>
-                      setDraftVoice((prev) => ({
-                        ...prev,
-                        sanitizeHeadersFooters: e.target.checked,
-                      }))
-                    }
-                    className="mt-1 rounded accent-indigo-500"
-                  />
-                  <div>
-                    <span className="block text-xs font-semibold text-slate-200">
-                      Filtro Inteligente de Cabeçalhos, Rodapés e Marcas d'Água
-                    </span>
-                    <span className="block text-[11px] text-slate-400">
-                      Remove automaticamente cabeçalhos de páginas, numeração, CPF/e-mail repetidos e rodapés institucionais.
-                    </span>
-                  </div>
-                </label>
-
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input
                     type="checkbox"
@@ -885,7 +574,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                       Pré-Carregamento Lookahead (Zero Latência entre Frases)
                     </span>
                     <span className="block text-[11px] text-slate-400">
-                      Enquanto a frase atual é lida, o motor neural já sintetiza a próxima frase em segundo plano.
+                      Enquanto a frase atual é lida, o Piper já sintetiza a próxima frase em segundo plano.
                     </span>
                   </div>
                 </label>
@@ -926,7 +615,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                       </span>
                     </h3>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Salva na sua conta para Modo Professor, Flashcards e Limpeza Inteligente de PDFs
+                      Usada para Extração Cirúrgica de PDFs (estilo Demo), Modo Professor e Flashcards
                     </p>
                   </div>
                   <a
@@ -1040,7 +729,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                   </div>
                 </div>
 
-                {/* AI PDF Sanitizer Option */}
+                {/* AI PDF Deep Extraction Option */}
                 <div className="pt-2 border-t border-slate-800">
                   <label className="flex items-start gap-3 cursor-pointer">
                     <input
@@ -1056,10 +745,10 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({
                     />
                     <div>
                       <span className="block text-xs font-bold text-emerald-300">
-                        ✨ Limpeza Inteligente de PDF com Gemini Flash-Lite ao Processar
+                        ✨ Extração Cirúrgica de Conteúdo com Gemini (Estilo Demo)
                       </span>
                       <span className="block text-[11px] text-slate-400 leading-relaxed">
-                        Usa o Gemini gratuitamente para eliminar cabeçalhos residuais, rodapés, sumários quebrados e dados desnecessários do PDF, mantendo apenas o texto importante para estudo.
+                        Ao enviar um PDF e escolher as páginas, o Gemini extrai literalmente apenas o texto de estudo destacado (títulos, explicações, alertas e questões), descartando capas, sumários, logos, cabeçalhos e rodapés.
                       </span>
                     </div>
                   </label>

@@ -11,6 +11,7 @@ export interface LlmChatRequestBody {
   systemPrompt: string;
   messages: ChatMessagePayload[];
   temperature?: number;
+  responseMimeType?: string;
 }
 
 export interface PreparedProviderRequest {
@@ -25,13 +26,21 @@ export const GEMINI_DEFAULT_BASE_URL =
 export function buildProviderRequest(
   req: LlmChatRequestBody
 ): PreparedProviderRequest {
-  const { apiKey, model, systemPrompt, messages, temperature = 0.4 } = req;
+  const {
+    apiKey,
+    model,
+    systemPrompt,
+    messages,
+    temperature = 0.25,
+    responseMimeType,
+  } = req;
   const trimmedKey = apiKey.trim();
   const baseUrl = (req.baseUrl?.trim() || GEMINI_DEFAULT_BASE_URL).replace(
     /\/+$/,
     ''
   );
-  const cleanModel = model.replace(/^models\//, '').trim() || 'gemini-3.5-flash-lite';
+  const cleanModel =
+    model.replace(/^models\//, '').trim() || 'gemini-3.5-flash-lite';
 
   const url = `${baseUrl}/models/${encodeURIComponent(
     cleanModel
@@ -43,6 +52,13 @@ export function buildProviderRequest(
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }],
     }));
+
+  const generationConfig: Record<string, any> = {
+    temperature,
+  };
+  if (responseMimeType) {
+    generationConfig.responseMimeType = responseMimeType;
+  }
 
   return {
     url,
@@ -57,9 +73,7 @@ export function buildProviderRequest(
         contents.length > 0
           ? contents
           : [{ role: 'user', parts: [{ text: 'Olá' }] }],
-      generationConfig: {
-        temperature,
-      },
+      generationConfig,
     }),
   };
 }

@@ -42,12 +42,6 @@ interface VoiceControlBarProps {
 
 const ENGINE_SHORT_LABELS: Record<TtsEngineMode, string> = {
   piper_wasm: 'Piper Neural',
-  kokoro_webgpu: 'Kokoro-82M',
-  edge_neural: 'Edge Neural',
-  gemini_tts: 'Gemini Audio',
-  openai_cloud: 'OpenAI Neural',
-  elevenlabs: 'ElevenLabs',
-  browser: 'Voz do Sistema',
 };
 
 export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
@@ -89,20 +83,16 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
   const badgeStyle =
     activeState === 'failed'
       ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border-rose-500/40'
-      : activeState === 'fallback'
-      ? 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40'
       : activeState === 'loading'
-      ? 'bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 border-indigo-500/40'
-      : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
+        ? 'bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 border-indigo-500/40'
+        : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
 
   const badgeText =
     activeState === 'failed'
-      ? `Erro: ${ENGINE_SHORT_LABELS[ttsEngine]}`
-      : activeState === 'fallback'
-      ? 'Fallback: Sistema'
+      ? `Erro: ${ENGINE_SHORT_LABELS[ttsEngine] || 'Piper Neural'}`
       : activeState === 'loading'
-      ? `Sintetizando (${ENGINE_SHORT_LABELS[ttsEngine]})...`
-      : engineStatus?.voiceLabel || ENGINE_SHORT_LABELS[ttsEngine] || 'Voz Neural';
+        ? `Sintetizando (${ENGINE_SHORT_LABELS[ttsEngine] || 'Piper Neural'})...`
+        : engineStatus?.voiceLabel || ENGINE_SHORT_LABELS[ttsEngine] || 'Piper Neural';
 
   return (
     <footer className="border-t border-slate-800/90 bg-slate-900/95 backdrop-blur-md shrink-0 z-20 relative">
@@ -177,13 +167,13 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
             className={`inline-flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-colors max-w-[140px] sm:max-w-[220px] truncate ${badgeStyle}`}
             title={
               engineStatus?.error
-                ? `Motivo da falha: ${engineStatus.error} (Clique para abrir Diagnóstico de Voz)`
-                : 'Clique para abrir o Diagnóstico de Voz e trocar entre Piper, Kokoro-82M e Edge Neural'
+                ? `Motivo da falha: ${engineStatus.error} (Clique para abrir configurações do Piper Neural)`
+                : 'Voz Piper Neural com Cache Permanente (Clique para configurar)'
             }
           >
             {activeState === 'loading' ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-            ) : activeState === 'failed' || activeState === 'fallback' ? (
+            ) : activeState === 'failed' ? (
               <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
             ) : activeState === 'playing' ? (
               <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
@@ -207,10 +197,10 @@ export const VoiceControlBar: React.FC<VoiceControlBarProps> = ({
                     isListeningUser
                       ? 'bg-rose-400 animate-pulse'
                       : isSpeakingAi
-                      ? 'bg-emerald-400 animate-pulse'
-                      : isReading
-                      ? 'bg-indigo-400 animate-pulse'
-                      : 'bg-slate-600'
+                        ? 'bg-emerald-400 animate-pulse'
+                        : isReading
+                          ? 'bg-indigo-400 animate-pulse'
+                          : 'bg-slate-600'
                   }`}
                 />
               ))}

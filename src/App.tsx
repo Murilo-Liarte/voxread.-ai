@@ -3,16 +3,24 @@ import { Header } from './components/Header';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { AccountModal } from './components/AccountModal';
 import { PdfLibraryModal } from './components/PdfLibraryModal';
+import { PdfPageRangeModal } from './components/PdfPageRangeModal';
 import { NeuroscienceModal } from './components/NeuroscienceModal';
 import { PdfOriginalViewer } from './components/PdfOriginalViewer';
 import { FocusedReaderView } from './components/FocusedReaderView';
 import { VoiceControlBar } from './components/VoiceControlBar';
 import { AssistantSidebar } from './components/AssistantSidebar';
-import { createDemoDocument, parsePdfArrayBuffer } from './services/pdfService';
+import {
+  buildCleanStudyDocumentFromAiBlocks,
+  createDemoDocument,
+  extractRawPagesForRange,
+  inspectPdfTotalPages,
+  parsePdfArrayBuffer,
+} from './services/pdfService';
 import { speechService } from './services/speechService';
 import {
   buildReadingSystemPrompt,
   callLlmAssistant,
+  extractCleanStudyBlocksWithGemini,
   generateSchematicSummary,
   generateTopicFlashcards,
   PROVIDERS_CATALOG,
@@ -63,6 +71,12 @@ import type {
 
 const SPEED_STEPS = [0.85, 1.0, 1.15, 1.3, 1.5, 1.75];
 
+interface PendingPdfUploadState {
+  file: File;
+  buffer: ArrayBuffer;
+  totalPages: number;
+}
+
 export const App: React.FC = () => {
   const [documentData, setDocumentData] = useState<PDFDocumentData>(() =>
     createDemoDocument()
@@ -97,6 +111,13 @@ export const App: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isLoadingPdf, setIsLoadingPdf] = useState<boolean>(false);
   const [isAiCleaningPdf, setIsAiCleaningPdf] = useState<boolean>(false);
+  const [pendingPdfUpload, setPendingPdfUpload] =
+    useState<PendingPdfUploadState | null>(null);
+  const [extractionProgressText, setExtractionProgressText] =
+    useState<string>('');
+  const [extractionProcessedPages, setExtractionProcessedPages] =
+    useState<number>(0);
+  const [extractionTotalPages, setExtractionTotalPages] = useState<number>(0);
   const [interimTranscript, setInterimTranscript] = useState<string>('');
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [cleanNoticeBanner, setCleanNoticeBanner] = useState<string | null>(null);
@@ -172,7 +193,7 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [readerState]);
 
-  // Restore persistent user account session, PDF library, and active document on startup
+  // Restore persistent user account session, warm up Piper Neural from permanent cache, and load PDF library
   useEffect(() => {
     let mounted = true;
 
@@ -181,6 +202,8 @@ export const App: React.FC = () => {
       if (!mounted) return;
 
       let activeUsername: string | null = null;
+      let activeVoiceId = voiceSettingsRef.current.piperVoiceId || 'pt_BR-faber-medium';
+
       if (restoredAcc) {
         setActiveAccount(restoredAcc);
         activeAccountRef.current = restoredAcc;
@@ -189,7 +212,11 @@ export const App: React.FC = () => {
         setProviderConfig(applied.providerConfig);
         setVoiceSettings(applied.voiceSettings);
         setStudyStats(applied.studyStats);
+        activeVoiceId = applied.voiceSettings.piperVoiceId || activeVoiceId;
       }
+
+      // Warm up Piper Neural from permanent OPFS + CacheStorage on startup so it doesn't reload when clicking Play
+      speechService.warmUpPiperOnStartup(activeVoiceId);
 
       const lib = await loadUserPdfLibrary(activeUsername);
       if (mounted) {
@@ -283,7 +310,6 @@ export const App: React.FC = () => {
           await handleLoadDocumentIntoWorkspace(latestDoc);
         }
       } else if (docRef.current.id !== 'demo-concursos-direito-adm') {
-        // Save currently open PDF to the newly created account's library!
         const nextLib = await saveDocumentToUserLibrary(
           docRef.current,
           acc.username
@@ -354,7 +380,6 @@ export const App: React.FC = () => {
             text: `Fim do tópico ${topic.title}. Hora do Active Recall! Primeira pergunta: ${generated[0].question}`,
             blockType: 'heading',
             settings: voiceSettingsRef.current,
-            geminiKeyFallback: providerConfigRef.current.apiKeys.gemini,
           });
         }
       } finally {
@@ -411,7 +436,6 @@ export const App: React.FC = () => {
         text: sentence.text,
         blockType: sentence.blockType,
         settings: voiceSettingsRef.current,
-        geminiKeyFallback: providerConfigRef.current.apiKeys.gemini,
         onStart: () => {
           const nextSentence = docRef.current.sentences[boundedIndex + 1];
           if (
@@ -493,7 +517,6 @@ export const App: React.FC = () => {
           speechService.speak({
             text: firstUnrevealed.answer,
             settings: voiceSettingsRef.current,
-            geminiKeyFallback: providerConfigRef.current.apiKeys.gemini,
           });
           return;
         }
@@ -583,7 +606,6 @@ export const App: React.FC = () => {
         speechService.speak({
           text: aiReply,
           settings: voiceSettingsRef.current,
-          geminiKeyFallback: config.apiKeys.gemini,
           onEnd: () => {
             if (voiceSettingsRef.current.autoResumeAfterAnswer) {
               speakSentenceAtIndex(resumeIdx);
@@ -665,7 +687,7 @@ export const App: React.FC = () => {
     speechService.stopListening();
   };
 
-  // Run Layer 3 Gemini AI Sanitizer on the currently open PDF
+  // Run Deep Gemini AI Study Content Extraction on the currently open PDF
   const handleRunGeminiCleanOnCurrentDoc = useCallback(async () => {
     if (!providerConfigRef.current.apiKeys.gemini?.trim()) {
       setIsSettingsOpen(true);
@@ -673,10 +695,43 @@ export const App: React.FC = () => {
     }
     setIsAiCleaningPdf(true);
     try {
-      const { cleanedDoc, removedByAiCount } = await sanitizeDocumentWithGemini({
-        doc: docRef.current,
-        config: providerConfigRef.current,
-      });
+      const currentDoc = docRef.current;
+      let cleanedDoc: PDFDocumentData | null = null;
+
+      if (currentDoc.pdfBytes) {
+        const startPage = currentDoc.selectedStartPage || 1;
+        const endPage = currentDoc.selectedEndPage || currentDoc.totalPages;
+        const { rawPages, originalTotalPages } = await extractRawPagesForRange(
+          currentDoc.pdfBytes,
+          startPage,
+          endPage
+        );
+        const { blocks } = await extractCleanStudyBlocksWithGemini({
+          rawPages,
+          config: providerConfigRef.current,
+        });
+        if (blocks.length > 0) {
+          cleanedDoc = buildCleanStudyDocumentFromAiBlocks({
+            fileName: currentDoc.fileName,
+            fileSize: currentDoc.fileSize,
+            pdfBytes: currentDoc.pdfBytes,
+            originalTotalPages,
+            startPage,
+            endPage,
+            rawPages,
+            blocks,
+          });
+        }
+      }
+
+      if (!cleanedDoc) {
+        const res = await sanitizeDocumentWithGemini({
+          doc: currentDoc,
+          config: providerConfigRef.current,
+        });
+        cleanedDoc = res.cleanedDoc;
+      }
+
       setDocumentData(cleanedDoc);
       docRef.current = cleanedDoc;
       setCurrentSentenceIndex(0);
@@ -686,81 +741,153 @@ export const App: React.FC = () => {
       );
       setPdfLibrary(nextLib);
       setCleanNoticeBanner(
-        `✨ Limpeza Gemini concluída: ${
-          cleanedDoc.removedNoiseCount || removedByAiCount
-        } cabeçalhos, rodapés e trechos irrelevantes removidos para leitura limpa!`
+        `✨ Extração Cirúrgica Gemini concluída: apenas o conteúdo puro de estudo (${cleanedDoc.sentences.length} frases e ${cleanedDoc.topics.length} tópicos) foi mantido para leitura!`
       );
     } finally {
       setIsAiCleaningPdf(false);
     }
   }, []);
 
-  // Upload a new PDF file, sanitize headers/footers + AI noise, and save to user's PDF library
+  // Step 1 of PDF Upload: Inspect total pages and open Page Range Selector Modal (`PdfPageRangeModal`)
   const handleUploadPdf = async (file: File) => {
     try {
       speechService.stopSpeaking();
       speechService.stopListening();
       setReaderState('idle');
-      setIsLoadingPdf(true);
       setErrorBanner(null);
       setCleanNoticeBanner(null);
+      setIsLoadingPdf(true);
 
       const buffer = await file.arrayBuffer();
-      let parsedDoc = await parsePdfArrayBuffer(
+      const totalPages = await inspectPdfTotalPages(buffer);
+
+      setPendingPdfUpload({
+        file,
         buffer,
-        file.name,
-        file.size,
-        voiceSettings.sanitizeHeadersFooters
-      );
-
-      // Layer 3: If Gemini API key is configured and AI PDF Sanitizer is enabled, clean remaining noise automatically!
-      if (
-        providerConfigRef.current.aiSanitizePdf !== false &&
-        providerConfigRef.current.apiKeys.gemini?.trim()
-      ) {
-        setIsAiCleaningPdf(true);
-        try {
-          const { cleanedDoc } = await sanitizeDocumentWithGemini({
-            doc: parsedDoc,
-            config: providerConfigRef.current,
-          });
-          parsedDoc = cleanedDoc;
-        } finally {
-          setIsAiCleaningPdf(false);
-        }
-      }
-
-      setDocumentData(parsedDoc);
-      docRef.current = parsedDoc;
-      setCurrentSentenceIndex(0);
-      setWordProgressRatio(0);
-      setMessages([]);
-      setFlashcards([]);
-      setSchematicSummary(null);
-
-      const nextLib = await saveDocumentToUserLibrary(
-        parsedDoc,
-        activeAccountRef.current?.username
-      );
-      setPdfLibrary(nextLib);
-
-      await saveConversationHistory(parsedDoc.id, []);
-      await saveFlashcards(parsedDoc.id, []);
-      await saveSchematicSummary(parsedDoc.id, null);
-
-      if ((parsedDoc.removedNoiseCount || 0) > 0) {
-        setCleanNoticeBanner(
-          `🧹 Leitura Limpa: ${parsedDoc.removedNoiseCount} cabeçalhos, rodapés e informações irrelevantes foram removidos automaticamente deste PDF.`
-        );
-      }
+        totalPages,
+      });
     } catch (err: any) {
       setErrorBanner(
-        `Erro ao processar o arquivo PDF "${file.name}": ${
+        `Erro ao ler o arquivo PDF "${file.name}": ${
           err?.message || 'Arquivo inválido.'
         }`
       );
     } finally {
       setIsLoadingPdf(false);
+    }
+  };
+
+  // Step 2 of PDF Upload: Extract ONLY the selected page range and run Deep Gemini Study Content Extraction
+  const handleConfirmPdfPageRange = async (
+    startPage: number,
+    endPage: number,
+    useDeepAi: boolean
+  ) => {
+    if (!pendingPdfUpload) return;
+    const { file, buffer, totalPages: originalTotalPages } = pendingPdfUpload;
+    const rangeCount = Math.max(1, endPage - startPage + 1);
+
+    try {
+      setIsLoadingPdf(true);
+      setIsAiCleaningPdf(true);
+      setExtractionProcessedPages(0);
+      setExtractionTotalPages(rangeCount);
+      setExtractionProgressText(
+        `Lendo páginas ${startPage} a ${endPage} do PDF...`
+      );
+
+      let finalDoc: PDFDocumentData | null = null;
+      const hasGeminiKey = Boolean(
+        providerConfigRef.current.apiKeys.gemini?.trim()
+      );
+
+      if (useDeepAi && hasGeminiKey) {
+        const { rawPages } = await extractRawPagesForRange(
+          buffer,
+          startPage,
+          endPage
+        );
+
+        setExtractionProgressText(
+          `Gemini IA extraindo apenas o conteúdo de estudo (págs. ${startPage} a ${endPage})...`
+        );
+
+        const { blocks } = await extractCleanStudyBlocksWithGemini({
+          rawPages,
+          config: providerConfigRef.current,
+          onProgress: (done, total) => {
+            setExtractionProcessedPages(done);
+            setExtractionTotalPages(total);
+            setExtractionProgressText(
+              `Gemini IA limpando logos, capas e rodapés (${done}/${total} págs.)...`
+            );
+          },
+        });
+
+        if (blocks.length > 0) {
+          finalDoc = buildCleanStudyDocumentFromAiBlocks({
+            fileName: file.name,
+            fileSize: file.size,
+            pdfBytes: buffer,
+            originalTotalPages,
+            startPage,
+            endPage,
+            rawPages,
+            blocks,
+          });
+        }
+      }
+
+      // Fallback if no Gemini API key or if AI returned 0 blocks
+      if (!finalDoc) {
+        setExtractionProgressText(
+          `Processando páginas ${startPage} a ${endPage} com filtro de cabeçalhos e rodapés...`
+        );
+        finalDoc = await parsePdfArrayBuffer(
+          buffer,
+          file.name,
+          file.size,
+          true,
+          startPage,
+          endPage
+        );
+      }
+
+      setDocumentData(finalDoc);
+      docRef.current = finalDoc;
+      setCurrentSentenceIndex(0);
+      sentenceIdxRef.current = 0;
+      setWordProgressRatio(0);
+      setMessages([]);
+      setFlashcards([]);
+      setSchematicSummary(null);
+      setPendingPdfUpload(null);
+
+      const nextLib = await saveDocumentToUserLibrary(
+        finalDoc,
+        activeAccountRef.current?.username
+      );
+      setPdfLibrary(nextLib);
+
+      await saveConversationHistory(finalDoc.id, []);
+      await saveFlashcards(finalDoc.id, []);
+      await saveSchematicSummary(finalDoc.id, null);
+
+      setCleanNoticeBanner(
+        finalDoc.aiCleaned
+          ? `✨ Páginas ${startPage} a ${endPage} extraídas com Gemini IA: apenas o texto puro de estudo (${finalDoc.sentences.length} frases em ${finalDoc.topics.length} tópicos) está destacado para leitura!`
+          : `🧹 Páginas ${startPage} a ${endPage} carregadas (${finalDoc.removedNoiseCount || 0} cabeçalhos/rodapés removidos).`
+      );
+    } catch (err: any) {
+      setErrorBanner(
+        `Erro ao processar páginas ${startPage} a ${endPage} de "${file.name}": ${
+          err?.message || 'Falha na extração.'
+        }`
+      );
+    } finally {
+      setIsLoadingPdf(false);
+      setIsAiCleaningPdf(false);
+      setExtractionProgressText('');
     }
   };
 
@@ -845,7 +972,8 @@ export const App: React.FC = () => {
 
   const currentSentence =
     documentData.sentences[currentSentenceIndex] || documentData.sentences[0];
-  const currentPage = currentSentence?.pageNumber || 1;
+  const currentPage =
+    currentSentence?.pageNumber || documentData.selectedStartPage || 1;
   const currentTopic =
     documentData.topics.find((t) => t.id === currentSentence?.topicId) ||
     documentData.topics[0];
@@ -878,7 +1006,7 @@ export const App: React.FC = () => {
               Solte sua apostila PDF aqui
             </p>
             <p className="text-sm text-indigo-200">
-              Remoção automática de cabeçalhos, rodapés e ruídos + salvamento na sua lista de leitura
+              Escolha o intervalo de páginas (ex: 50 a 71) e extraia apenas o conteúdo de estudo com Gemini IA
             </p>
           </div>
         </div>
@@ -887,7 +1015,7 @@ export const App: React.FC = () => {
       {/* Top Header */}
       <Header
         fileName={documentData.fileName}
-        totalPages={documentData.totalPages}
+        totalPages={documentData.selectedEndPage || documentData.totalPages}
         currentPage={currentPage}
         removedNoiseCount={documentData.removedNoiseCount}
         viewMode={viewMode}
@@ -934,23 +1062,7 @@ export const App: React.FC = () => {
               onClick={() => setIsSettingsOpen(true)}
               className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold transition-colors"
             >
-              Diagnóstico de Voz
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setErrorBanner(null);
-                const fallbackSettings: VoiceSettings = {
-                  ...voiceSettingsRef.current,
-                  ttsEngine: 'browser',
-                };
-                setVoiceSettings(fallbackSettings);
-                saveVoiceSettings(fallbackSettings);
-                speakSentenceAtIndex(currentSentenceIndex);
-              }}
-              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold transition-colors"
-            >
-              Usar Voz do Sistema Mesmo Assim
+              Configurar Piper / IA
             </button>
             <button
               type="button"
@@ -1051,7 +1163,6 @@ export const App: React.FC = () => {
             speechService.speak({
               text,
               settings: voiceSettings,
-              geminiKeyFallback: providerConfig.apiKeys.gemini,
             });
           }}
           onResumePdfReading={() => speakSentenceAtIndex(currentSentenceIndex)}
@@ -1099,7 +1210,7 @@ export const App: React.FC = () => {
         currentSentenceIndex={currentSentenceIndex}
         totalSentences={documentData.sentences.length}
         currentPage={currentPage}
-        totalPages={documentData.totalPages}
+        totalPages={documentData.selectedEndPage || documentData.totalPages}
         speechRate={voiceSettings.rate}
         ttsEngine={voiceSettings.ttsEngine}
         engineStatus={engineStatus}
@@ -1128,7 +1239,27 @@ export const App: React.FC = () => {
         onResumeReadingNow={() => speakSentenceAtIndex(currentSentenceIndex)}
       />
 
-      {/* Expressive Voice & Google AI Studio Settings Modal */}
+      {/* Page Range Selector & Deep Gemini Extraction Modal */}
+      <PdfPageRangeModal
+        isOpen={Boolean(pendingPdfUpload)}
+        fileName={pendingPdfUpload?.file.name || ''}
+        fileSize={pendingPdfUpload?.file.size || 0}
+        totalPages={pendingPdfUpload?.totalPages || 1}
+        hasGeminiApiKey={Boolean(providerConfig.apiKeys.gemini?.trim())}
+        isProcessing={isLoadingPdf || isAiCleaningPdf}
+        progressText={extractionProgressText}
+        processedPages={extractionProcessedPages}
+        totalRangePages={extractionTotalPages}
+        onConfirmRange={handleConfirmPdfPageRange}
+        onCancel={() => {
+          if (!isLoadingPdf && !isAiCleaningPdf) {
+            setPendingPdfUpload(null);
+          }
+        }}
+        onOpenApiModal={() => setIsSettingsOpen(true)}
+      />
+
+      {/* Piper Neural Voice & Google AI Studio Settings Modal */}
       <ApiKeyModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

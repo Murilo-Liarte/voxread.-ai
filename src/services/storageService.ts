@@ -90,23 +90,14 @@ export function saveProviderConfig(config: ProviderConfig): void {
   }
 }
 
-const CURRENT_VOICE_SETTINGS_VERSION = 3;
+const CURRENT_VOICE_SETTINGS_VERSION = 4;
 
 export function createDefaultVoiceSettings(): VoiceSettings {
   return {
     settingsVersion: CURRENT_VOICE_SETTINGS_VERSION,
     ttsEngine: 'piper_wasm',
     piperVoiceId: 'pt_BR-faber-medium',
-    kokoroVoiceId: 'pf_dora',
-    edgeVoiceId: 'pt-BR-FranciscaNeural',
-    edgeProxyUrl: '',
     allowSystemVoiceFallback: false,
-    browserVoiceURI: '',
-    geminiVoiceName: 'Kore',
-    cloudVoiceId: 'nova',
-    elevenLabsVoiceId: 'EXAVITQu4vr4xnSDxMaL',
-    elevenLabsApiKey: '',
-    openAiTtsApiKey: '',
     rate: 1.05,
     pitch: 1.02,
     expressiveProsody: true,
@@ -125,16 +116,17 @@ export function loadVoiceSettings(): VoiceSettings {
     if (!raw) return createDefaultVoiceSettings();
     const parsed = JSON.parse(raw) as Partial<VoiceSettings>;
     const defaults = createDefaultVoiceSettings();
-    const merged: VoiceSettings = { ...defaults, ...parsed };
+    const merged: VoiceSettings = {
+      ...defaults,
+      ...parsed,
+      ttsEngine: 'piper_wasm',
+      piperVoiceId: parsed.piperVoiceId || defaults.piperVoiceId,
+    };
 
     if (
       !parsed.settingsVersion ||
       parsed.settingsVersion < CURRENT_VOICE_SETTINGS_VERSION
     ) {
-      if (merged.ttsEngine === 'browser') {
-        merged.ttsEngine = 'piper_wasm';
-      }
-      merged.allowSystemVoiceFallback = false;
       merged.settingsVersion = CURRENT_VOICE_SETTINGS_VERSION;
       saveVoiceSettings(merged);
     }
@@ -238,14 +230,18 @@ export function buildLibrarySummaryFromDoc(
     fileName: doc.fileName,
     fileSize: doc.fileSize,
     totalPages: doc.totalPages,
+    originalTotalPages: doc.originalTotalPages || doc.totalPages,
+    selectedStartPage: doc.selectedStartPage || 1,
+    selectedEndPage: doc.selectedEndPage || doc.totalPages,
     uploadedAt: doc.uploadedAt || Date.now(),
     lastReadAt: Date.now(),
     currentSentenceIndex: currentIdx,
     totalSentences: doc.sentences.length,
-    currentPage: currentSent?.pageNumber || 1,
+    currentPage: currentSent?.pageNumber || doc.selectedStartPage || 1,
     progressPercent,
     removedNoiseCount: doc.removedNoiseCount || 0,
     aiCleaned: Boolean(doc.aiCleaned),
+    cleaningMode: doc.cleaningMode || (doc.aiCleaned ? 'ai' : 'basic'),
   };
 }
 

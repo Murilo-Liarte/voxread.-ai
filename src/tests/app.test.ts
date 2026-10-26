@@ -7,6 +7,8 @@ import {
   classifySentenceBlockType,
   detectRepetitiveHeaderFooterFingerprints,
   stripInlineWatermarks,
+  normalizePageRange,
+  buildCleanStudyDocumentFromAiBlocks,
 } from '../services/pdfService';
 import {
   buildProviderRequest,
@@ -22,12 +24,9 @@ import {
   pcmBase64ToWavBlob,
   formatExpressiveTextForNeuralTts,
   PIPER_WASM_PATHS,
-  speechService,
 } from '../services/speechService';
-import { portugueseToKokoroIpa } from '../services/ptBrPhonemizer';
 import {
   loadVoiceSettings,
-  createDefaultVoiceSettings,
   saveDocumentToUserLibrary,
   loadUserPdfLibrary,
   updateDocumentReadingProgress,
@@ -42,7 +41,92 @@ import {
 } from '../services/authService';
 import ortPkg from '../../node_modules/onnxruntime-web/package.json';
 
-describe('PDF Sentence, BBox & 3-Layer Intelligent Sanitizer', () => {
+describe('PDF Page Range Selector, Deep AI Study Extraction & Sanitizer', () => {
+  it('normalizes page ranges including 0-to-22 and 50-to-71 accurately', () => {
+    expect(normalizePageRange(0, 22, 100)).toEqual({
+      startPage: 1,
+      endPage: 22,
+    });
+    expect(normalizePageRange(50, 71, 100)).toEqual({
+      startPage: 50,
+      endPage: 71,
+    });
+    expect(normalizePageRange(71, 50, 100)).toEqual({
+      startPage: 50,
+      endPage: 71,
+    });
+    expect(normalizePageRange(-5, 999, 80)).toEqual({
+      startPage: 1,
+      endPage: 80,
+    });
+  });
+
+  it('builds a clean Demo-style study document from Gemini AI extracted blocks', () => {
+    const cleanDoc = buildCleanStudyDocumentFromAiBlocks({
+      fileName: 'Apostila_Direito_Constitucional.pdf',
+      fileSize: 2048000,
+      originalTotalPages: 120,
+      startPage: 50,
+      endPage: 52,
+      rawPages: [
+        {
+          pageNumber: 50,
+          lines: [],
+        },
+        {
+          pageNumber: 51,
+          lines: [
+            {
+              text: '1. Direitos e Garantias Fundamentais',
+              pdfY: 700,
+              normY: 0.15,
+              lineHeight: 14,
+              boxes: [{ x: 0.08, y: 0.14, width: 0.7, height: 0.03 }],
+            },
+            {
+              text: 'Os direitos fundamentais possuem aplicabilidade imediata.',
+              pdfY: 650,
+              normY: 0.25,
+              lineHeight: 12,
+              boxes: [{ x: 0.08, y: 0.24, width: 0.82, height: 0.03 }],
+            },
+          ],
+        },
+      ],
+      blocks: [
+        {
+          pageNumber: 51,
+          blockType: 'heading',
+          topicTitle: '1. Direitos e Garantias Fundamentais',
+          text: '1. Direitos e Garantias Fundamentais',
+        },
+        {
+          pageNumber: 51,
+          blockType: 'normal',
+          topicTitle: '1. Direitos e Garantias Fundamentais',
+          text: 'Os direitos fundamentais possuem aplicabilidade imediata conforme o artigo quinto, parágrafo primeiro.',
+        },
+        {
+          pageNumber: 51,
+          blockType: 'alert',
+          topicTitle: '1. Direitos e Garantias Fundamentais',
+          text: 'Atenção! Não existem direitos fundamentais absolutos no ordenamento brasileiro.',
+        },
+      ],
+    });
+
+    expect(cleanDoc.selectedStartPage).toBe(50);
+    expect(cleanDoc.selectedEndPage).toBe(52);
+    expect(cleanDoc.originalTotalPages).toBe(120);
+    expect(cleanDoc.aiCleaned).toBe(true);
+    expect(cleanDoc.cleaningMode).toBe('ai');
+    expect(cleanDoc.sentences.length).toBe(3);
+    expect(cleanDoc.sentences[0].blockType).toBe('heading');
+    expect(cleanDoc.sentences[2].blockType).toBe('alert');
+    expect(cleanDoc.topics.length).toBe(1);
+    expect(cleanDoc.topics[0].title).toContain('Direitos e Garantias');
+  });
+
   it('splits paragraphs into natural sentences without breaking on common abbreviations', () => {
     const paragraph =
       'O Dr. Carlos analisou o Art. 5 da constituição com atenção. Em seguida, ele apresentou um resumo claro para toda a equipe.';
@@ -56,8 +140,16 @@ describe('PDF Sentence, BBox & 3-Layer Intelligent Sanitizer', () => {
     expect(isHeaderOrFooterArtifact('Estratégia Concursos', 0.02, true)).toBe(true);
     expect(isHeaderOrFooterArtifact('Gran Cursos Online', 0.98, true)).toBe(true);
     expect(isHeaderOrFooterArtifact('Página 14 de 98', 0.96, true)).toBe(true);
-    expect(isHeaderOrFooterArtifact('1.2 Direitos Fundamentais ................... 18', 0.4, true)).toBe(true);
-    expect(isHeaderOrFooterArtifact('Aula 03 - Prof. Herbert Almeida', 0.03, true)).toBe(true);
+    expect(
+      isHeaderOrFooterArtifact(
+        '1.2 Direitos Fundamentais ................... 18',
+        0.4,
+        true
+      )
+    ).toBe(true);
+    expect(
+      isHeaderOrFooterArtifact('Aula 03 - Prof. Herbert Almeida', 0.03, true)
+    ).toBe(true);
     expect(
       isHeaderOrFooterArtifact(
         'O princípio da impessoalidade veda a promoção pessoal de autoridades.',
@@ -70,23 +162,44 @@ describe('PDF Sentence, BBox & 3-Layer Intelligent Sanitizer', () => {
   it('detects cross-page repetitive headers, footers, and watermarks across multiple pages', () => {
     const simulatedPages = [
       [
-        { text: 'Curso Regular Direito Constitucional - Aula 01 - Pág. 1 de 50', normY: 0.03 },
-        { text: 'O poder constituinte originário é inicial, ilimitado e incondicionado.', normY: 0.4 },
+        {
+          text: 'Curso Regular Direito Constitucional - Aula 01 - Pág. 1 de 50',
+          normY: 0.03,
+        },
+        {
+          text: 'O poder constituinte originário é inicial, ilimitado e incondicionado.',
+          normY: 0.4,
+        },
         { text: 'Aluno: João da Silva - Documento exclusivo', normY: 0.95 },
       ],
       [
-        { text: 'Curso Regular Direito Constitucional - Aula 01 - Pág. 2 de 50', normY: 0.03 },
-        { text: 'Já o poder constituinte derivado está sujeito a limites formais e materiais.', normY: 0.45 },
+        {
+          text: 'Curso Regular Direito Constitucional - Aula 01 - Pág. 2 de 50',
+          normY: 0.03,
+        },
+        {
+          text: 'Já o poder constituinte derivado está sujeito a limites formais e materiais.',
+          normY: 0.45,
+        },
         { text: 'Aluno: João da Silva - Documento exclusivo', normY: 0.95 },
       ],
       [
-        { text: 'Curso Regular Direito Constitucional - Aula 01 - Pág. 3 de 50', normY: 0.03 },
-        { text: 'As cláusulas pétreas estão previstas no artigo 60, parágrafo quarto.', normY: 0.5 },
+        {
+          text: 'Curso Regular Direito Constitucional - Aula 01 - Pág. 3 de 50',
+          normY: 0.03,
+        },
+        {
+          text: 'As cláusulas pétreas estão previstas no artigo 60, parágrafo quarto.',
+          normY: 0.5,
+        },
         { text: 'Aluno: João da Silva - Documento exclusivo', normY: 0.95 },
       ],
     ];
 
-    const repetitiveSet = detectRepetitiveHeaderFooterFingerprints(simulatedPages, true);
+    const repetitiveSet = detectRepetitiveHeaderFooterFingerprints(
+      simulatedPages,
+      true
+    );
     expect(
       isHeaderOrFooterArtifact(
         'Curso Regular Direito Constitucional - Aula 01 - Pág. 4 de 50',
@@ -164,18 +277,21 @@ describe('Exclusive Google AI Studio (Gemini Free Tier) & Account System', () =>
     expect(GEMINI_FREE_TIER_FALLBACK_CHAIN[0]).toBe('gemini-3.5-flash-lite');
   });
 
-  it('formats Google Gemini requests and extracts responses properly', () => {
+  it('formats Google Gemini requests (including responseMimeType JSON) and extracts responses properly', () => {
     const req = buildProviderRequest({
       provider: 'gemini',
       apiKey: 'AIzaTestKey123',
       model: 'gemini-3.5-flash-lite',
       systemPrompt: 'Você é um professor de concursos.',
       messages: [{ role: 'user', content: 'Explique com analogia.' }],
+      responseMimeType: 'application/json',
     });
 
     expect(req.url).toContain(
       'gemini-3.5-flash-lite:generateContent?key=AIzaTestKey123'
     );
+    expect(req.body).toContain('"responseMimeType":"application/json"');
+
     const extracted = extractProviderText('gemini', {
       candidates: [
         {
@@ -228,18 +344,23 @@ describe('Exclusive Google AI Studio (Gemini Free Tier) & Account System', () =>
     expect(afterLogout).toBeNull();
   });
 
-  it('maintains the user personal PDF reading list and updates reading progress', async () => {
+  it('maintains the user personal PDF reading list with page ranges and updates reading progress', async () => {
     const demo = createDemoDocument();
     const userDoc = {
       ...demo,
       id: 'doc-direito-constitucional-1',
       fileName: 'Aula_01_Direito_Constitucional.pdf',
+      selectedStartPage: 50,
+      selectedEndPage: 71,
+      originalTotalPages: 120,
       removedNoiseCount: 24,
     };
 
     const listAfterSave = await saveDocumentToUserLibrary(userDoc, 'murilo');
     expect(listAfterSave.length).toBe(1);
     expect(listAfterSave[0].fileName).toBe('Aula_01_Direito_Constitucional.pdf');
+    expect(listAfterSave[0].selectedStartPage).toBe(50);
+    expect(listAfterSave[0].selectedEndPage).toBe(71);
     expect(listAfterSave[0].removedNoiseCount).toBe(24);
 
     const listAfterProgress = await updateDocumentReadingProgress(
@@ -261,56 +382,21 @@ describe('Exclusive Google AI Studio (Gemini Free Tier) & Account System', () =>
   });
 });
 
-describe('Zero-API Expressive Neural TTS & Anti-Robotic Fallback', () => {
-  it('defaults to Zero-API Piper Neural WASM engine with silent browser fallback disabled', () => {
+describe('Exclusive Piper Neural WASM Voice Engine & Permanent Cache', () => {
+  it('defaults exclusively to Piper Neural WASM (pt_BR-faber-medium) with lookahead prefetch', () => {
     const settings = loadVoiceSettings();
     expect(settings.ttsEngine).toBe('piper_wasm');
     expect(settings.piperVoiceId).toBe('pt_BR-faber-medium');
-    expect(settings.kokoroVoiceId).toBe('pf_dora');
-    expect(settings.allowSystemVoiceFallback).toBe(false);
     expect(settings.prefetchNextSentence).toBe(true);
   });
 
   it('matches PIPER_WASM_PATHS.onnxWasm to the exact installed onnxruntime-web version', () => {
-    expect(PIPER_WASM_PATHS.onnxWasm).toContain(`onnxruntime-web@${ortPkg.version}`);
-  });
-
-  it('converts Brazilian Portuguese text into Kokoro-82M IPA phonemes without npm:phonemizer', () => {
-    const ipa = portugueseToKokoroIpa(
-      'Atenção! Na Administração Pública, o gestor só age quando a lei autoriza.'
+    expect(PIPER_WASM_PATHS.onnxWasm).toContain(
+      `onnxruntime-web@${ortPkg.version}`
     );
-    expect(ipa).toContain('atẽsˈɐ̃w');
-    expect(ipa).toContain('adiministɾasˈɐ̃w');
-    expect(ipa).toContain('pˈublikɐ');
   });
 
-  it('does NOT silently fall back to browser voice when allowSystemVoiceFallback is false', async () => {
-    const statuses: string[] = [];
-    const unsub = speechService.subscribeEngineStatus((st) => {
-      statuses.push(st.state);
-    });
-
-    let reportedError = '';
-    await speechService.speak({
-      text: 'Teste sem chave de API.',
-      settings: {
-        ...createDefaultVoiceSettings(),
-        ttsEngine: 'gemini_tts',
-        allowSystemVoiceFallback: false,
-      },
-      geminiKeyFallback: '',
-      onError: (err) => {
-        reportedError = err;
-      },
-    });
-
-    unsub();
-    expect(statuses).toContain('failed');
-    expect(statuses).not.toContain('fallback');
-    expect(reportedError).toContain('Gemini');
-  });
-
-  it('shapes Portuguese text with expressive prosody pauses for neural TTS models', () => {
+  it('shapes Portuguese text with expressive prosody pauses for Piper Neural TTS', () => {
     const alertText = formatExpressiveTextForNeuralTts(
       'O princípio da legalidade exige lei formal.',
       'alert'
@@ -319,7 +405,7 @@ describe('Zero-API Expressive Neural TTS & Anti-Robotic Fallback', () => {
     expect(alertText).toContain('... ');
   });
 
-  it('converts Gemini 24kHz PCM base64 audio into a valid WAV Blob', () => {
+  it('converts 24kHz PCM base64 audio into a valid WAV Blob', () => {
     const dummyPcm = btoa('\x00\x00\x01\x00\x02\x00\x03\x00');
     const blob = pcmBase64ToWavBlob(dummyPcm, 24000);
     expect(blob.type).toBe('audio/wav');

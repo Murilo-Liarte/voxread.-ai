@@ -1,5 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import type {
+  AiExtractedStudyBlock,
   NormalizedBBox,
   PDFDocumentData,
   PDFPageContent,
@@ -24,20 +25,14 @@ const ABBREVIATION_REGEX =
   /\b(Sr|Sra|Dr|Dra|Prof|Profa|Cap|Art|Arts|Inc|Ltd|etc|ex|fig|pág|págs|vol|nº|no|vs|pe|Min|Rel|CF|CC|CP|CPC|CPP|CLT)\.\s*$/i;
 
 /**
- * Comprehensive patterns typical of headers, footers, watermarks, TOC dots, and editorial noise
+ * Comprehensive patterns typical of headers, footers, watermarks, TOC dots, logos, and editorial noise
  */
 const HEADER_FOOTER_NOISE_REGEX =
   /^(página\s+\d+\s*(de|\/)?\s*\d*|pág\.?\s*\d+\s*(de|\/)?\s*\d*|\d+\s*(de|\/)\s*\d+|estratégia\s+concursos.*|gran\s+cursos\s+online.*|direção\s+concursos.*|alfacon\s+concursos.*|todos\s+os\s+direitos\s+reservados.*|proibida\s+a\s+reprodução.*|documento\s+exclusivo\s+para\s+uso\s+pessoal.*|licenciado\s+para\s+.*|impresso\s+por\s+.*|material\s+de\s+uso\s+exclusivo.*|cpf[:\s-]*\d{3}\.?\d{3}\.?\d{3}-?\d{2}.*|cnpj[:\s-]*\d{2}\..*|isbn[:\s-]*[\d-]+|issn[:\s-]*[\d-]+|https?:\/\/\S+|www\.\S+|\S+@\S+\.\S+|\d{1,4})$/i;
 
-/**
- * Inline or mid-line watermarks / CPF / email / URL stamps that pollute lines
- */
 const INLINE_WATERMARK_NOISE_REGEX =
   /(cpf[:\s]*\d{3}\.?\d{3}\.?\d{3}-?\d{2}|todos os direitos reservados|proibida a reprodução total ou parcial|licenciado para [^-|•\n]+|impresso por [^-|•\n]+|www\.estrategiaconcursos\.com\.br|www\.grancursosonline\.com\.br)/gi;
 
-/**
- * Table-of-contents dot leaders (e.g., "1.2 Direitos Individuais ................... 14")
- */
 const TOC_DOT_LEADER_REGEX = /([.…\s]{5,}|\s+[-_]{4,}\s+)\d{1,4}\s*$/;
 
 const HEADING_TOPIC_REGEX =
@@ -49,11 +44,53 @@ const ALERT_BOX_REGEX =
 const QUESTION_LIST_REGEX =
   /^(questão\s+\d+|\d+\s*[.)]\s*\((cebraspe|cespe|fgv|fcc|vunesp|cesgranrio|ibfc|idecan|aocp))/i;
 
+export interface ReconstructedPdfLine {
+  text: string;
+  pdfY: number;
+  normY: number;
+  lineHeight: number;
+  boxes: NormalizedBBox[];
+}
+
+export interface ExtractedRawPage {
+  pageNumber: number;
+  lines: ReconstructedPdfLine[];
+}
+
 /**
- * Normalizes a line into a canonical fingerprint (digits replaced with `#`, accents/case normalized)
- * so running headers/footers like "Aula 02 - Direito Constitucional - Pág. 14 de 90"
- * match across pages ("aula # - direito constitucional - pag. # de #").
+ * Normalizes user page range input (e.g. `0 a 22` -> `1 a 22`, `50 a 71` -> `50 a 71`)
  */
+export function normalizePageRange(
+  startInput: number,
+  endInput: number,
+  totalPages: number
+): { startPage: number; endPage: number } {
+  const safeTotal = Math.max(1, Math.floor(totalPages || 1));
+  const rawStart = Number.isFinite(startInput) ? Math.floor(startInput) : 1;
+  const rawEnd = Number.isFinite(endInput) ? Math.floor(endInput) : safeTotal;
+
+  // Treat 0 (or negative) as page 1 so "0 a 22" works intuitively as "1 a 22"
+  const clampedStart = Math.max(1, Math.min(safeTotal, rawStart <= 0 ? 1 : rawStart));
+  const clampedEnd = Math.max(1, Math.min(safeTotal, rawEnd <= 0 ? safeTotal : rawEnd));
+
+  return {
+    startPage: Math.min(clampedStart, clampedEnd),
+    endPage: Math.max(clampedStart, clampedEnd),
+  };
+}
+
+/**
+ * Quickly inspects the total number of pages in a PDF ArrayBuffer
+ */
+export async function inspectPdfTotalPages(
+  fileBuffer: ArrayBuffer
+): Promise<number> {
+  const bufferCopy = fileBuffer.slice(0);
+  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(bufferCopy) });
+  const pdfDoc = await loadingTask.promise;
+  return pdfDoc.numPages || 1;
+}
+
 export function normalizeLineFingerprint(line: string): string {
   return line
     .trim()
@@ -64,9 +101,6 @@ export function normalizeLineFingerprint(line: string): string {
     .replace(/\s+/g, ' ');
 }
 
-/**
- * Detects line fingerprints that repeat across multiple pages (running headers, footers, or watermarks).
- */
 export function detectRepetitiveHeaderFooterFingerprints(
   pagesLines: { text: string; normY: number }[][],
   sanitizeEnabled = true
@@ -100,7 +134,6 @@ export function detectRepetitiveHeaderFooterFingerprints(
 
   const minPagesForGlobalRepeat = totalPages >= 4 ? 3 : 2;
   for (const [fp, stats] of pageFrequency.entries()) {
-    // If a short/medium line repeats across >= 3 pages (or >= 2 pages in top/bottom 12% margin zones)
     if (
       stats.count >= minPagesForGlobalRepeat ||
       (stats.marginHits >= 2 && stats.count / totalPages >= 0.4)
@@ -112,9 +145,6 @@ export function detectRepetitiveHeaderFooterFingerprints(
   return repeatedFingerprints;
 }
 
-/**
- * Checks if a line of text in a PDF is a header, footer, watermark, TOC line, or non-content artifact
- */
 export function isHeaderOrFooterArtifact(
   text: string,
   normalizedY: number | null,
@@ -125,17 +155,14 @@ export function isHeaderOrFooterArtifact(
   const trimmed = text.trim();
   if (!trimmed) return false;
 
-  // 1. Direct noise match (page numbers, platforms, copyright, URLs, emails, CPF, etc.)
   if (HEADER_FOOTER_NOISE_REGEX.test(trimmed)) {
     return true;
   }
 
-  // 2. Table of contents dot leaders ("1. Introdução ............. 04")
   if (TOC_DOT_LEADER_REGEX.test(trimmed)) {
     return true;
   }
 
-  // 3. Cross-page repetitive running header/footer/watermark fingerprint
   if (repetitiveFingerprints && repetitiveFingerprints.size > 0) {
     const fp = normalizeLineFingerprint(trimmed);
     if (repetitiveFingerprints.has(fp)) {
@@ -143,7 +170,6 @@ export function isHeaderOrFooterArtifact(
     }
   }
 
-  // 4. Spatial Top Header Zone (< 8.5% of page height) & Bottom Footer Zone (> 91.5% of page height)
   if (normalizedY !== null && (normalizedY < 0.085 || normalizedY > 0.915)) {
     if (
       trimmed.length < 110 &&
@@ -158,10 +184,10 @@ export function isHeaderOrFooterArtifact(
   return false;
 }
 
-/**
- * Cleans inline watermark fragments from a line while keeping surrounding didactic text
- */
-export function stripInlineWatermarks(text: string, sanitizeEnabled = true): string {
+export function stripInlineWatermarks(
+  text: string,
+  sanitizeEnabled = true
+): string {
   if (!sanitizeEnabled) return text;
   return text
     .replace(INLINE_WATERMARK_NOISE_REGEX, '')
@@ -169,9 +195,6 @@ export function stripInlineWatermarks(text: string, sanitizeEnabled = true): str
     .trim();
 }
 
-/**
- * Classifies sentence block type for expressive TTS intonation and topic splitting
- */
 export function classifySentenceBlockType(text: string): SentenceBlockType {
   const clean = text.trim();
   if (ALERT_BOX_REGEX.test(clean)) return 'alert';
@@ -186,9 +209,6 @@ export function classifySentenceBlockType(text: string): SentenceBlockType {
   return 'normal';
 }
 
-/**
- * Splits paragraph text into natural sentences suitable for voice synthesis (TTS).
- */
 export function splitParagraphIntoSentences(paragraph: string): string[] {
   const cleaned = paragraph.replace(/\s+/g, ' ').trim();
   if (!cleaned) return [];
@@ -237,9 +257,6 @@ export function splitParagraphIntoSentences(paragraph: string): string[] {
   return merged;
 }
 
-/**
- * Builds topic boundaries and marks `isTopicEnd` on the final sentence of each topic
- */
 export function finalizeTopicsAndSentences(
   sentences: PDFSentence[]
 ): PDFTopic[] {
@@ -260,7 +277,6 @@ export function finalizeTopicsAndSentences(
         !/[.!?]$/.test(sent.text));
 
     if (isNewHeading && idx > 0 && idx - currentTopicStart >= 2) {
-      // Mark previous sentence as end of the previous topic
       sentences[idx - 1].isTopicEnd = true;
       topics.push({
         id: currentTopicId,
@@ -282,7 +298,6 @@ export function finalizeTopicsAndSentences(
     sent.topicTitle = currentTopicTitle;
   });
 
-  // Close final topic
   const lastIdx = sentences.length - 1;
   sentences[lastIdx].isTopicEnd = true;
   topics.push({
@@ -297,8 +312,179 @@ export function finalizeTopicsAndSentences(
 }
 
 /**
- * Segments raw page text into paragraphs and indexed sentences with simulated or exact vertical BBoxes
+ * Matches a clean sentence back to the original PDF lines on that page by token overlap
+ * so BBox highlighting on the PDF tab still works accurately.
  */
+export function matchSentenceToLineBoxes(
+  sentenceText: string,
+  pageLines: ReconstructedPdfLine[],
+  fallbackRatio = 0.5
+): NormalizedBBox[] {
+  if (!pageLines || pageLines.length === 0) {
+    return [
+      {
+        x: 0.08,
+        y: Math.min(0.88, Math.max(0.1, fallbackRatio)),
+        width: 0.84,
+        height: 0.04,
+      },
+    ];
+  }
+
+  const tokenize = (str: string) =>
+    str
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 3);
+
+  const sentTokens = new Set(tokenize(sentenceText));
+  if (sentTokens.size === 0) {
+    return pageLines[0].boxes;
+  }
+
+  const matchedBoxes: NormalizedBBox[] = [];
+  for (const line of pageLines) {
+    const lineTokens = tokenize(line.text);
+    if (lineTokens.length === 0) continue;
+    let hits = 0;
+    for (const tok of lineTokens) {
+      if (sentTokens.has(tok)) hits++;
+    }
+    if (hits >= 2 || hits / lineTokens.length >= 0.5) {
+      matchedBoxes.push(...line.boxes);
+    }
+  }
+
+  if (matchedBoxes.length > 0) {
+    return matchedBoxes.slice(0, 24);
+  }
+
+  return [
+    {
+      x: 0.08,
+      y: Math.min(0.88, Math.max(0.1, fallbackRatio)),
+      width: 0.84,
+      height: 0.04,
+    },
+  ];
+}
+
+/**
+ * Builds a clean, Demo-style PDFDocumentData directly from the study blocks extracted by Gemini IA!
+ * Logos, headers, footers, cover pages, TOCs, ads, and non-study noise are 100% absent.
+ */
+export function buildCleanStudyDocumentFromAiBlocks(params: {
+  blocks: AiExtractedStudyBlock[];
+  rawPages: ExtractedRawPage[];
+  fileName: string;
+  fileSize: number;
+  originalTotalPages: number;
+  startPage: number;
+  endPage: number;
+  pdfBytes?: ArrayBuffer;
+}): PDFDocumentData {
+  const {
+    blocks,
+    rawPages,
+    fileName,
+    fileSize,
+    originalTotalPages,
+    startPage,
+    endPage,
+    pdfBytes,
+  } = params;
+
+  const pagesMap = new Map<number, AiExtractedStudyBlock[]>();
+  for (const b of blocks) {
+    const text = b.text?.trim();
+    if (!text) continue;
+    const list = pagesMap.get(b.pageNumber) || [];
+    list.push({ ...b, text });
+    pagesMap.set(b.pageNumber, list);
+  }
+
+  const pages: PDFPageContent[] = [];
+  const allSentences: PDFSentence[] = [];
+  let currentGlobal = 0;
+
+  const sortedPageNumbers = Array.from(pagesMap.keys()).sort((a, b) => a - b);
+
+  for (const pageNum of sortedPageNumbers) {
+    const pageBlocks = pagesMap.get(pageNum) || [];
+    if (pageBlocks.length === 0) continue;
+
+    const rawPageObj = rawPages.find((rp) => rp.pageNumber === pageNum);
+    const pageLines = rawPageObj?.lines || [];
+
+    const paragraphs: string[] = [];
+    const sentenceIds: string[] = [];
+
+    pageBlocks.forEach((block, pIdx) => {
+      paragraphs.push(block.text);
+      const paraSentences =
+        block.blockType === 'heading'
+          ? [block.text]
+          : splitParagraphIntoSentences(block.text);
+
+      paraSentences.forEach((sentText, sIdx) => {
+        const id = `p${pageNum}-par${pIdx}-s${sIdx}`;
+        const effectiveType =
+          block.blockType !== 'normal'
+            ? block.blockType
+            : classifySentenceBlockType(sentText);
+
+        const approxY = 0.12 + (pIdx / Math.max(1, pageBlocks.length)) * 0.75;
+        const bboxes = matchSentenceToLineBoxes(sentText, pageLines, approxY);
+
+        allSentences.push({
+          id,
+          globalIndex: currentGlobal++,
+          pageNumber: pageNum,
+          paragraphIndex: pIdx,
+          sentenceInParagraph: sIdx,
+          text: sentText,
+          blockType: effectiveType,
+          topicId: 'topic-1',
+          topicTitle: 'Tópico de Estudo',
+          bboxes,
+        });
+        sentenceIds.push(id);
+      });
+    });
+
+    pages.push({
+      pageNumber: pageNum,
+      rawText: paragraphs.join('\n\n'),
+      paragraphs,
+      sentenceIds,
+      ignoredHeaderFooterCount: 0,
+    });
+  }
+
+  const topics = finalizeTopicsAndSentences(allSentences);
+
+  return {
+    id: `doc-${fileName.replace(/[^a-zA-Z0-9_-]/g, '_')}-${fileSize}-p${startPage}-${endPage}`,
+    fileName,
+    fileSize,
+    totalPages: originalTotalPages,
+    originalTotalPages,
+    selectedStartPage: startPage,
+    selectedEndPage: endPage,
+    cleaningMode: 'ai',
+    uploadedAt: Date.now(),
+    pages,
+    sentences: allSentences,
+    topics,
+    currentSentenceIndex: 0,
+    aiCleaned: true,
+    pdfBytes: pdfBytes ? pdfBytes.slice(0) : undefined,
+  };
+}
+
 export function segmentPageText(
   rawPageText: string,
   pageNumber: number,
@@ -359,7 +545,6 @@ export function segmentPageText(
     );
     let charCursor = 0;
 
-    // Default vertical band for this paragraph if exact PDF item BBoxes aren't supplied
     const paraTopY = 0.12 + (pIdx / Math.max(1, paragraphs.length)) * 0.74;
     const paraBandHeight = Math.min(0.22, 0.72 / Math.max(1, paragraphs.length));
 
@@ -419,33 +604,33 @@ export function segmentPageText(
   };
 }
 
-interface ReconstructedPdfLine {
-  text: string;
-  pdfY: number;
-  normY: number;
-  lineHeight: number;
-  boxes: NormalizedBBox[];
-}
-
 /**
- * Extracts structured text, sentences, topics, and exact normalized bounding boxes from a PDF ArrayBuffer
- * using our 2-pass geometric + cross-page header/footer/watermark sanitizer.
+ * Extracts reconstructed horizontal lines + coordinates ONLY for the selected page range `[startPage, endPage]`.
  */
-export async function parsePdfArrayBuffer(
+export async function extractRawPagesForRange(
   fileBuffer: ArrayBuffer,
-  fileName: string,
-  fileSize: number,
-  sanitizeHeadersFooters = true
-): Promise<PDFDocumentData> {
+  startPageInput?: number,
+  endPageInput?: number
+): Promise<{
+  rawPages: ExtractedRawPage[];
+  originalTotalPages: number;
+  startPage: number;
+  endPage: number;
+}> {
   const bufferCopy = fileBuffer.slice(0);
   const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(bufferCopy) });
   const pdfDoc = await loadingTask.promise;
 
-  const totalPages = pdfDoc.numPages;
-  const rawPagesLines: ReconstructedPdfLine[][] = [];
+  const originalTotalPages = pdfDoc.numPages || 1;
+  const { startPage, endPage } = normalizePageRange(
+    startPageInput ?? 1,
+    endPageInput ?? originalTotalPages,
+    originalTotalPages
+  );
 
-  // PASS 1: Reconstruct complete horizontal lines per page with exact normalized coordinates
-  for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+  const rawPages: ExtractedRawPage[] = [];
+
+  for (let pageNum = startPage; pageNum <= endPage; pageNum++) {
     const page = await pdfDoc.getPage(pageNum);
     const viewport = page.getViewport({ scale: 1.0 });
     const pageWidth = viewport.width || 600;
@@ -482,7 +667,8 @@ export async function parsePdfArrayBuffer(
       const lastLine = pageLines[pageLines.length - 1];
       if (
         lastLine &&
-        Math.abs(lastLine.pdfY - pdfY) <= Math.max(lastLine.lineHeight, itemH) * 0.45
+        Math.abs(lastLine.pdfY - pdfY) <=
+          Math.max(lastLine.lineHeight, itemH) * 0.45
       ) {
         const needsSpace =
           !lastLine.text.endsWith(' ') && !text.startsWith(' ');
@@ -499,23 +685,47 @@ export async function parsePdfArrayBuffer(
       }
     }
 
-    rawPagesLines.push(pageLines);
+    rawPages.push({
+      pageNumber: pageNum,
+      lines: pageLines,
+    });
   }
 
-  // PASS 2: Detect cross-page repetitive running headers, footers, and watermarks across all pages
+  return {
+    rawPages,
+    originalTotalPages,
+    startPage,
+    endPage,
+  };
+}
+
+/**
+ * Extracts structured text, sentences, topics, and exact normalized bounding boxes from a PDF ArrayBuffer
+ * for a given page range `[startPage, endPage]`.
+ */
+export async function parsePdfArrayBuffer(
+  fileBuffer: ArrayBuffer,
+  fileName: string,
+  fileSize: number,
+  sanitizeHeadersFooters = true,
+  startPageInput?: number,
+  endPageInput?: number
+): Promise<PDFDocumentData> {
+  const { rawPages, originalTotalPages, startPage, endPage } =
+    await extractRawPagesForRange(fileBuffer, startPageInput, endPageInput);
+
   const repetitiveFingerprints = detectRepetitiveHeaderFooterFingerprints(
-    rawPagesLines,
+    rawPages.map((p) => p.lines),
     sanitizeHeadersFooters
   );
 
-  // PASS 3: Filter out noise lines and assemble clean study paragraphs + sentences
   const pages: PDFPageContent[] = [];
   const allSentences: PDFSentence[] = [];
   let totalRemovedNoiseCount = 0;
 
-  for (let idx = 0; idx < rawPagesLines.length; idx++) {
-    const pageNum = idx + 1;
-    const pageLines = rawPagesLines[idx];
+  for (const rawPage of rawPages) {
+    const pageNum = rawPage.pageNumber;
+    const pageLines = rawPage.lines;
 
     let lastY: number | null = null;
     let lastHeight = 12;
@@ -585,18 +795,20 @@ export async function parsePdfArrayBuffer(
     );
     pageContent.ignoredHeaderFooterCount += ignoredCount;
 
-    pages.push(pageContent);
-    allSentences.push(...sentences);
+    if (sentences.length > 0) {
+      pages.push(pageContent);
+      allSentences.push(...sentences);
+    }
   }
 
   if (allSentences.length === 0) {
     const fallbackSentence: PDFSentence = {
-      id: 'p1-par0-s0',
+      id: `p${startPage}-par0-s0`,
       globalIndex: 0,
-      pageNumber: 1,
+      pageNumber: startPage,
       paragraphIndex: 0,
       sentenceInParagraph: 0,
-      text: 'Não foi possível extrair texto selecionável deste PDF. Verifique se o documento possui camada de texto digital.',
+      text: 'Não foi possível extrair texto selecionável deste intervalo de páginas. Verifique se o PDF possui camada de texto digital.',
       blockType: 'normal',
       topicId: 'topic-1',
       topicTitle: 'Aviso de Leitura',
@@ -605,7 +817,7 @@ export async function parsePdfArrayBuffer(
     };
     allSentences.push(fallbackSentence);
     pages.push({
-      pageNumber: 1,
+      pageNumber: startPage,
       rawText: fallbackSentence.text,
       paragraphs: [fallbackSentence.text],
       sentenceIds: [fallbackSentence.id],
@@ -616,10 +828,14 @@ export async function parsePdfArrayBuffer(
   const topics = finalizeTopicsAndSentences(allSentences);
 
   return {
-    id: `doc-${fileName.replace(/[^a-zA-Z0-9_-]/g, '_')}-${fileSize}`,
+    id: `doc-${fileName.replace(/[^a-zA-Z0-9_-]/g, '_')}-${fileSize}-p${startPage}-${endPage}`,
     fileName,
     fileSize,
-    totalPages,
+    totalPages: originalTotalPages,
+    originalTotalPages,
+    selectedStartPage: startPage,
+    selectedEndPage: endPage,
+    cleaningMode: 'basic',
     uploadedAt: Date.now(),
     pages,
     sentences: allSentences,
@@ -671,6 +887,10 @@ export function createDemoDocument(): PDFDocumentData {
     fileName: 'Apostila_Direito_Administrativo_Concursos.pdf',
     fileSize: 215400,
     totalPages: demoPagesRaw.length,
+    originalTotalPages: demoPagesRaw.length,
+    selectedStartPage: 1,
+    selectedEndPage: demoPagesRaw.length,
+    cleaningMode: 'ai',
     uploadedAt: Date.now(),
     pages,
     sentences: allSentences,

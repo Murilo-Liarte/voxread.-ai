@@ -1,6 +1,7 @@
 import { buildProviderRequest, extractProviderText } from '../server/llmProxy';
-import { finalizeTopicsAndSentences } from './pdfService';
+import { finalizeTopicsAndSentences, type ExtractedRawPage } from './pdfService';
 import type {
+  AiExtractedStudyBlock,
   ConversationMessage,
   FlashcardItem,
   GeminiModelOption,
@@ -215,6 +216,7 @@ async function executeGeminiRequestWithModel(params: {
   systemPrompt: string;
   messages: { role: 'user' | 'assistant'; content: string }[];
   temperature?: number;
+  responseMimeType?: string;
 }): Promise<string> {
   const payload = {
     provider: 'gemini' as const,
@@ -224,6 +226,7 @@ async function executeGeminiRequestWithModel(params: {
     systemPrompt: params.systemPrompt,
     messages: params.messages,
     temperature: params.temperature ?? 0.35,
+    responseMimeType: params.responseMimeType,
   };
 
   // Direct call to Google AI Studio API (works identically on GitHub Pages and localhost)
@@ -252,8 +255,10 @@ export async function callLlmAssistant(params: {
   systemPrompt: string;
   history: ConversationMessage[];
   userQuestion: string;
+  temperature?: number;
+  responseMimeType?: string;
 }): Promise<string> {
-  const { config, systemPrompt, history, userQuestion } = params;
+  const { config, systemPrompt, history, userQuestion, temperature, responseMimeType } = params;
   const apiKey = config.apiKeys.gemini?.trim();
   const preferredModel =
     config.selectedModels.gemini?.trim() || PROVIDERS_CATALOG.gemini.defaultModel;
@@ -291,6 +296,8 @@ export async function callLlmAssistant(params: {
         baseUrl,
         systemPrompt,
         messages,
+        temperature,
+        responseMimeType,
       });
     } catch (err: any) {
       lastError = err;
@@ -303,6 +310,141 @@ export async function callLlmAssistant(params: {
   }
 
   throw lastError || new Error('Falha ao comunicar com o Google AI Studio (Gemini).');
+}
+
+/**
+ * Deep AI Study Content Extractor:
+ * Sends raw extracted pages in small batches to Gemini (`responseMimeType: 'application/json'`)
+ * and reconstructs ONLY the clean study content (headings, paragraphs, exam alerts, question items)
+ * exactly like the clean Demo experience — completely discarding logos, headers, footers,
+ * cover pages, sumário/table of contents, student CPF/watermarks, and marketing/institutional noise.
+ */
+export async function extractCleanStudyBlocksWithGemini(params: {
+  rawPages: ExtractedRawPage[];
+  config: ProviderConfig;
+  onProgress?: (processedPages: number, totalPages: number) => void;
+}): Promise<{ blocks: AiExtractedStudyBlock[]; discardedPagesCount: number }> {
+  const { rawPages, config, onProgress } = params;
+  const apiKey = config.apiKeys.gemini?.trim();
+  if (!apiKey || rawPages.length === 0) {
+    return { blocks: [], discardedPagesCount: 0 };
+  }
+
+  const PAGES_PER_BATCH = 3;
+  const allBlocks: AiExtractedStudyBlock[] = [];
+  const pagesWithStudyContent = new Set<number>();
+  let processedPages = 0;
+
+  for (let i = 0; i < rawPages.length; i += PAGES_PER_BATCH) {
+    const batch = rawPages.slice(i, i + PAGES_PER_BATCH);
+    const pagesPayload = batch
+      .map((p) => ({
+        pageNumber: p.pageNumber,
+        rawText: p.lines.map((l) => l.text).join('\n').slice(0, 12000),
+      }))
+      .filter((p) => p.rawText.trim().length > 15);
+
+    if (pagesPayload.length > 0) {
+      try {
+        const rawJson = await callLlmAssistant({
+          config,
+          temperature: 0.15,
+          responseMimeType: 'application/json',
+          systemPrompt: `Você é um extrator cirúrgico de conteúdo didático de PDFs para estudo e leitura em voz alta.
+Sua missão é transformar o texto bruto das páginas do PDF em blocos de estudo 100% limpos (igual a uma apostila enxuta de leitura), mantendo APENAS o conteúdo real de estudo e descartando TODO o resto.
+
+REGRAS OBRIGATÓRIAS DE EXCLUSÃO (REMOVA 100%):
+1. REMOVA capas, contracapas, fichas catalográficas, ISBN, direitos autorais e expediente.
+2. REMOVA sumários / índices com linhas pontilhadas ou listas de páginas.
+3. REMOVA logos, nomes de cursinhos (Estratégia, Gran Cursos, Direção, Alfacon, etc.), cabeçalhos e rodapés repetitivos, nomes de professores soltos no topo/rodapé, datas e numeração de página ("Página X de Y", "Aula 01", etc.).
+4. REMOVA marcas d'água de alunos (CPF, RG, nome completo + e-mail, "Licenciado para...", "Proibida a reprodução").
+5. REMOVA propagandas, links de redes sociais (Instagram, YouTube, Telegram), QR codes e avisos administrativos.
+
+REGRAS DE EXTRAÇÃO E FORMATAÇÃO DO CONTEÚDO DE ESTUDO:
+- Una linhas quebradas artificialmente pelo PDF em parágrafos e frases completas, naturais e prontas para leitura em voz alta.
+- Preserve fielmente a matéria de estudo: explicações teóricas, artigos de lei, jurisprudência, exemplos práticos, esquemas em texto, dicas de banca e questões de prova.
+- Classifique cada bloco extraído em um dos 4 tipos ("type"):
+  - "heading": Título de capítulo, seção ou tópico de estudo (ex: "1. Princípios da Administração Pública", "2.1. Poder de Polícia").
+  - "normal": Parágrafo explicativo, doutrina, artigo de lei ou conceito teórico.
+  - "alert": Jurisprudência (STF/STJ), súmula, atenção, pegadinha de banca, exceção importante ou dica de prova.
+  - "question_item": Enunciado de questão de concurso, itens de julgar (Certo/Errado), alternativas ou comentário de gabarito.
+- Se uma página inteira for apenas capa, sumário ou propaganda sem conteúdo de estudo real, NÃO gere blocos para ela.
+
+Retorne EXCLUSIVAMENTE um JSON válido no formato:
+{
+  "blocks": [
+    {
+      "pageNumber": 1,
+      "type": "heading",
+      "topicTitle": "1. Título do Tópico",
+      "text": "1. Título do Tópico"
+    },
+    {
+      "pageNumber": 1,
+      "type": "normal",
+      "topicTitle": "1. Título do Tópico",
+      "text": "Texto limpo e fluido do parágrafo de estudo..."
+    }
+  ]
+}`,
+          history: [],
+          userQuestion: JSON.stringify({ pages: pagesPayload }),
+        });
+
+        const jsonMatch = rawJson.match(/\{[\s\S]*\}/);
+        const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawJson) as {
+          blocks?: Array<{
+            pageNumber?: number;
+            type?: string;
+            topicTitle?: string;
+            text?: string;
+          }>;
+        };
+
+        if (Array.isArray(parsed?.blocks)) {
+          for (const item of parsed.blocks) {
+            const text = (item?.text || '').replace(/\s+/g, ' ').trim();
+            if (text.length < 3) continue;
+            const pageNumber =
+              typeof item.pageNumber === 'number'
+                ? item.pageNumber
+                : pagesPayload[0].pageNumber;
+            const validType =
+              item.type === 'heading' ||
+              item.type === 'alert' ||
+              item.type === 'question_item'
+                ? item.type
+                : 'normal';
+
+            pagesWithStudyContent.add(pageNumber);
+            allBlocks.push({
+              pageNumber,
+              blockType: validType,
+              topicTitle: item.topicTitle?.trim(),
+              text,
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('Aviso na extração profunda Gemini para lote de páginas:', err);
+      }
+    }
+
+    processedPages = Math.min(rawPages.length, i + batch.length);
+    if (onProgress) {
+      onProgress(processedPages, rawPages.length);
+    }
+  }
+
+  const discardedPagesCount = Math.max(
+    0,
+    rawPages.length - pagesWithStudyContent.size
+  );
+
+  return {
+    blocks: allBlocks,
+    discardedPagesCount,
+  };
 }
 
 /**
